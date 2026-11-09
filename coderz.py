@@ -20,7 +20,7 @@ import pytz
 import datetime
 import discord
 from discord.ui import Modal, TextInput
-from discord_webhook import DiscordWebhook
+from discord_webhook import DiscordWebhook, DiscordEmbed
 from pystyle import Colors, Colorate, Center
 import authsystem
 from logger import info, warn, fail, success, debug
@@ -1062,7 +1062,7 @@ class BoostModal(Modal):
             send_webhook_message(webhook_url, content, embed)
 
         try:
-            if config['customizations']['enable']:
+            if config.get('customizations', {}).get('enable', False):
                 boost.humanizerthread(tokens=tokens)
         except Exception as e:
             print(e)

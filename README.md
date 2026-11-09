@@ -86,11 +86,27 @@ Customize the activity status and rich presence for tokens kept online:
 
 ## 🛠️ Usage
 
+### Option A: Local Console Tool
 Run the main program:
 ```bash
 python main.py
 ```
 *(Or double-click `start.bat` on Windows)*
+
+### Option B: Discord Bot (Control from Discord with Commands)
+You can control the booster directly from your Discord server:
+1. Paste your Discord bot token in `config/config.yaml` (`bot_token`).
+2. Run the bot:
+```bash
+python bot.py
+```
+*(Or double-click `start_bot.bat` on Windows)*
+
+3. In your Discord server:
+   - Type `$boost` to open the interactive popup modal.
+   - Type `$boost <invite> <amount> <months>` (e.g. `$boost discord.gg/example 2 1`).
+   - Type `$stock` to check remaining Nitro token stock.
+   - Type `/boost` for the Discord slash command modal.
 
 Select one of the menu options:
 - `[1] Boost a Server`:
