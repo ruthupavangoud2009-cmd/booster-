@@ -3,9 +3,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Large / backup archives
+# Large / backup archives & binaries
 *.zip
 *.tar.gz
+*.apk
+*.rar
+apk/
+
 
 # Runtime output logs & data
 output/
