@@ -18,6 +18,9 @@ import tls_client
 import websocket
 import pytz
 import datetime
+import discord
+from discord.ui import Modal, TextInput
+from discord_webhook import DiscordWebhook
 from pystyle import Colors, Colorate, Center
 import authsystem
 from logger import info, warn, fail, success, debug
