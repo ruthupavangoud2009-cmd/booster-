@@ -1,0 +1,14 @@
+discord:
+  webhook_url: ""
+
+extras:
+  use_log: true
+
+  captcha_solver:
+    solve_captcha: false
+    use: "capsolver"
+    hcoptcha_api_key: ""
+    capsolver_api_key: ""
+    csolver_key: ""
+    dchcaptcha_api_key: ""
+    max_retries: 5

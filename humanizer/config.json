@@ -1,0 +1,11 @@
+{
+  "RetryLimit": 3,
+  "CustomizationSettings": {
+    "Avatar": true,
+    "DisplayName": true,
+    "Bio": true,
+    "Banner": false,
+    "Pronouns": true,
+    "Hypesquad": true
+  }
+}

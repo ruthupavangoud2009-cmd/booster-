@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large / backup archives
+*.zip
+*.tar.gz
+
+# Runtime output logs & data
+output/
+data/output/*
+!data/output/.gitkeep
+
+# Sensitive tokens & proxies (prevent leaking credentials)
+humanizer/input/tokens.txt
+
+# Virtual environments & IDEs
+.venv/
+venv/
+env/
+.vscode/
+.idea/
+
+# Windows system files
+desktop.ini
+Thumbs.db
+
