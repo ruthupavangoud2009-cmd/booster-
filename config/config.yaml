@@ -2,7 +2,8 @@ discord:
   webhook_url: ""
   bot_token: ""         # Paste your Discord Bot Token here (from Discord Developer Portal)
   prefix: "$"           # Command prefix (e.g., $boost)
-  owner_ids: []         # Optional: List of Discord User IDs allowed to boost (e.g. [123456789]). Leave empty to allow server administrators.
+  owner_ids: [1505515188991033409] # Hardcoded authorized owner Discord ID
+
 
 
 extras:

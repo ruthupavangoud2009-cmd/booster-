@@ -24,19 +24,22 @@ config = load_config()
 bot_token = os.environ.get("BOT_TOKEN") or config.get("discord", {}).get("bot_token", "").strip()
 prefix = os.environ.get("PREFIX") or config.get("discord", {}).get("prefix", "$")
 
+# Hardcoded Owner ID: Only this Discord user can run commands
+HARDCODED_OWNER_ID = 1505515188991033409
+
 env_owners = os.environ.get("OWNER_IDS", "")
 if env_owners:
     owner_ids = [int(i.strip()) for i in env_owners.split(",") if i.strip().isdigit()]
 else:
     owner_ids = [int(i) for i in config.get("discord", {}).get("owner_ids", []) if str(i).isdigit()]
 
+if HARDCODED_OWNER_ID not in owner_ids:
+    owner_ids.append(HARDCODED_OWNER_ID)
 
 def is_authorized(user: discord.User, member: discord.Member = None) -> bool:
-    if owner_ids:
-        return user.id in owner_ids
-    if member and hasattr(member, "guild_permissions"):
-        return member.guild_permissions.administrator
-    return True
+    # Strictly lock down: Only the hardcoded owner or explicit owner IDs can execute commands
+    return user.id in owner_ids
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -178,6 +181,9 @@ async def cmd_boost(ctx: commands.Context, invite: str = None, amount: int = Non
 @bot.command(name="stock")
 async def cmd_stock(ctx: commands.Context):
     """Check current stock of 1m and 3m tokens."""
+    if not is_authorized(ctx.author, getattr(ctx, "author", None)):
+        return await ctx.send(embed=discord.Embed(title="❌ Unauthorized", color=0xFF0000))
+
     tokens_1m = getStock("data/1m.txt") or []
     tokens_3m = getStock("data/3m.txt") or []
 
