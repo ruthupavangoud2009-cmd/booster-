@@ -17,6 +17,14 @@ def load_config():
 config = load_config()
 bot_token = config.get("discord", {}).get("bot_token", "").strip()
 prefix = config.get("discord", {}).get("prefix", "$")
+owner_ids = [int(i) for i in config.get("discord", {}).get("owner_ids", []) if str(i).isdigit()]
+
+def is_authorized(user: discord.User, member: discord.Member = None) -> bool:
+    if owner_ids:
+        return user.id in owner_ids
+    if member and hasattr(member, "guild_permissions"):
+        return member.guild_permissions.administrator
+    return True
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -29,6 +37,8 @@ class BoostLaunchView(View):
 
     @discord.ui.button(label="🚀 Boost a Server", style=discord.ButtonStyle.primary, custom_id="boost_modal_btn")
     async def boost_button(self, interaction: discord.Interaction, button: Button):
+        if not is_authorized(interaction.user, getattr(interaction, "user", None)):
+            return await interaction.response.send_message("❌ You are not authorized to use this boost panel.", ephemeral=True)
         await interaction.response.send_modal(BoostModal())
 
 @bot.event
@@ -36,6 +46,10 @@ async def on_ready():
     print("=" * 50)
     print(f" [+] Bot Logged in as: {bot.user.name} ({bot.user.id})")
     print(f" [+] Prefix: {prefix}")
+    if owner_ids:
+        print(f" [+] Authorized Owners: {owner_ids}")
+    else:
+        print(f" [+] Access: Server Administrators (add owner_ids in config.yaml to lock down)")
     print(f" [+] Use {prefix}boost or {prefix}stock in Discord")
     print("=" * 50)
     try:
@@ -46,6 +60,8 @@ async def on_ready():
 
 @bot.tree.command(name="boost", description="Open the Discord server booster panel")
 async def slash_boost(interaction: discord.Interaction):
+    if not is_authorized(interaction.user, getattr(interaction, "user", None)):
+        return await interaction.response.send_message("❌ You are not authorized to use the booster.", ephemeral=True)
     await interaction.response.send_modal(BoostModal())
 
 @bot.command(name="boost")
@@ -55,6 +71,13 @@ async def cmd_boost(ctx: commands.Context, invite: str = None, amount: int = Non
       $boost -> Opens interactive boost popup button
       $boost <invite> <amount> <months> -> Boosts directly
     """
+    if not is_authorized(ctx.author, getattr(ctx, "author", None)):
+        return await ctx.send(embed=discord.Embed(
+            title="❌ Access Denied",
+            description="You are not authorized to spend boost tokens.",
+            color=0xFF0000
+        ))
+
     # If no parameters provided, send button to open the modal popup
     if not invite or not amount or not months:
         embed = discord.Embed(
@@ -175,3 +198,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
