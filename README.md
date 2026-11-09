@@ -93,20 +93,28 @@ python main.py
 ```
 *(Or double-click `start.bat` on Windows)*
 
-### Option B: Discord Bot (Control from Discord with Commands)
-You can control the booster directly from your Discord server:
-1. Paste your Discord bot token in `config/config.yaml` (`bot_token`).
-2. Run the bot:
-```bash
-python bot.py
-```
-*(Or double-click `start_bot.bat` on Windows)*
+### Option C: 24/7 Cloud Hosting on Render (Use from Anywhere)
+You can deploy this bot to **Render.com** so it runs 24/7 without needing your computer on:
+1. Fork or push this repository to your GitHub.
+2. Log into **[Render.com](https://render.com)** and click **New + ➔ Web Service**.
+3. Select your repository `booster-`.
+4. Render will automatically detect settings, or set:
+   - **Environment**: `Python`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python bot.py`
+5. In **Environment Variables**, add:
+   - `BOT_TOKEN`: Your Discord Bot token
+   - `OWNER_IDS`: Your Discord user ID (e.g. `123456789`)
+   - `PREFIX`: `$` (optional)
+   - `TOKENS_1M`: (optional) paste your 1m tokens here
+6. Click **Deploy Web Service**.
+7. Once deployed, Render gives you a URL (e.g. `https://booster-bot.onrender.com`).
+   * Add this URL to a free uptime monitor (like **UptimeRobot.com** or **cron-job.org**) set to ping every 5-10 minutes to keep the free service awake 24/7!
+8. Add new tokens anytime directly from Discord using:
+   ```text
+   $restock 1m your_token_here
+   ```
 
-3. In your Discord server:
-   - Type `$boost` to open the interactive popup modal.
-   - Type `$boost <invite> <amount> <months>` (e.g. `$boost discord.gg/example 2 1`).
-   - Type `$stock` to check remaining Nitro token stock.
-   - Type `/boost` for the Discord slash command modal.
 
 Select one of the menu options:
 - `[1] Boost a Server`:

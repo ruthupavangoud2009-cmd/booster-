@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: booster-discord-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: PREFIX
+        value: "$"
+      - key: OWNER_IDS
+        sync: false

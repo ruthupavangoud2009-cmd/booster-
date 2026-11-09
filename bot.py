@@ -9,15 +9,27 @@ from discord.ui import View, Button, Modal, TextInput
 
 import coderz
 from coderz import BoostModal, getStock, getinviteCode, checkInvite, Booster, remove, create_session_folder
+from keep_alive import keep_alive
 
 def load_config():
-    with open("config/config.yaml", "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    try:
+        with open("config/config.yaml", "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
 
 config = load_config()
-bot_token = config.get("discord", {}).get("bot_token", "").strip()
-prefix = config.get("discord", {}).get("prefix", "$")
-owner_ids = [int(i) for i in config.get("discord", {}).get("owner_ids", []) if str(i).isdigit()]
+
+# Support both Render Environment Variables and config.yaml
+bot_token = os.environ.get("BOT_TOKEN") or config.get("discord", {}).get("bot_token", "").strip()
+prefix = os.environ.get("PREFIX") or config.get("discord", {}).get("prefix", "$")
+
+env_owners = os.environ.get("OWNER_IDS", "")
+if env_owners:
+    owner_ids = [int(i.strip()) for i in env_owners.split(",") if i.strip().isdigit()]
+else:
+    owner_ids = [int(i) for i in config.get("discord", {}).get("owner_ids", []) if str(i).isdigit()]
+
 
 def is_authorized(user: discord.User, member: discord.Member = None) -> bool:
     if owner_ids:
@@ -172,7 +184,50 @@ async def cmd_stock(ctx: commands.Context):
     embed = discord.Embed(title="📦 Current Token Stock", color=0x5865F2)
     embed.add_field(name="1-Month Tokens", value=f"`{len(tokens_1m)}` tokens (`{len(tokens_1m) * 2}` boosts)", inline=True)
     embed.add_field(name="3-Month Tokens", value=f"`{len(tokens_3m)}` tokens (`{len(tokens_3m) * 2}` boosts)", inline=True)
-    embed.set_footer(text=f"Use {prefix}boost to apply boosts")
+    embed.set_footer(text=f"Use {prefix}boost to apply boosts | Use {prefix}restock to add tokens")
+    await ctx.send(embed=embed)
+
+@bot.command(name="restock")
+async def cmd_restock(ctx: commands.Context, duration: str = None, *, token_data: str = None):
+    """
+    Restock tokens directly from Discord (message is auto-deleted for privacy).
+    Usage:
+      $restock 1m <token or email:pass:token>
+      $restock 3m <token or email:pass:token>
+    """
+    if not is_authorized(ctx.author, getattr(ctx, "author", None)):
+        return await ctx.send(embed=discord.Embed(title="❌ Unauthorized", color=0xFF0000))
+
+    if duration not in ["1m", "3m"] or not token_data:
+        return await ctx.send(embed=discord.Embed(
+            title="ℹ️ Restock Usage",
+            description=f"`{prefix}restock <1m|3m> <token>`\n\nExample:\n`{prefix}restock 1m email:pass:token`\n(You can also paste multiple tokens on separate lines)",
+            color=0x5865F2
+        ))
+
+    filename = "data/1m.txt" if duration == "1m" else "data/3m.txt"
+    os.makedirs("data", exist_ok=True)
+
+    tokens_added = 0
+    with open(filename, "a", encoding="utf-8") as f:
+        for line in token_data.strip().splitlines():
+            line_clean = line.strip()
+            if line_clean:
+                f.write(line_clean + "\n")
+                tokens_added += 1
+
+    # Delete message with the raw tokens for privacy
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    current_stock = len(getStock(filename) or [])
+    embed = discord.Embed(
+        title="✅ Tokens Added to Stock",
+        description=f"Added `{tokens_added}` tokens to **{duration}** stock.\n**Current Total**: `{current_stock}` tokens (`{current_stock * 2}` boosts).",
+        color=0x57F287
+    )
     await ctx.send(embed=embed)
 
 @bot.command(name="help")
@@ -182,16 +237,34 @@ async def cmd_help(ctx: commands.Context):
     embed.add_field(name=f"`{prefix}boost`", value="Opens the interactive boost panel popup.", inline=False)
     embed.add_field(name=f"`{prefix}boost <invite> <amount> <months>`", value="Directly boost a server (e.g. `$boost discord.gg/test 2 1`).", inline=False)
     embed.add_field(name=f"`{prefix}stock`", value="Shows currently available token stock.", inline=False)
+    embed.add_field(name=f"`{prefix}restock <1m|3m> <tokens>`", value="Add tokens to stock directly via Discord.", inline=False)
     embed.add_field(name=f"`/boost`", value="Slash command version that pops up the boost modal.", inline=False)
     await ctx.send(embed=embed)
+
 
 def main():
     if not bot_token:
         print("\n [!] ERROR: No bot token found!")
-        print(" [!] Please open 'config/config.yaml' and paste your Discord bot token under 'bot_token'.")
+        print(" [!] Please set BOT_TOKEN environment variable or set 'bot_token' in config/config.yaml.")
         print(" [!] Example: bot_token: \"MTI...\"\n")
-        input(" Press Enter to exit...")
+        # In cloud environments like Render, don't block on input()
+        if not os.environ.get("RENDER"):
+            input(" Press Enter to exit...")
         sys.exit(1)
+
+    # Start 24/7 web server for Render health checks and uptime pingers
+    keep_alive()
+
+    # Load initial tokens from environment variables if present (useful on Render)
+    for env_key, filepath in [("TOKENS_1M", "data/1m.txt"), ("TOKENS_3M", "data/3m.txt")]:
+        tokens_raw = os.environ.get(env_key, "").strip()
+        if tokens_raw:
+            os.makedirs("data", exist_ok=True)
+            with open(filepath, "a", encoding="utf-8") as f:
+                for line in tokens_raw.replace("\\n", "\n").splitlines():
+                    if line.strip():
+                        f.write(line.strip() + "\n")
+            print(f" [+] Loaded tokens from {env_key} into {filepath}")
 
     print(" [*] Connecting to Discord...")
     bot.run(bot_token)
