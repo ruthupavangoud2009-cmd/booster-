@@ -35,6 +35,8 @@ Run the following in your terminal or command prompt:
 pip install -r requirements.txt
 ```
 
+*(On Windows, you can also simply double-click `install.bat`)*
+
 If you plan to use the humanizer module directly:
 ```bash
 pip install -r humanizer/requirements.txt
@@ -88,6 +90,7 @@ Run the main program:
 ```bash
 python main.py
 ```
+*(Or double-click `start.bat` on Windows)*
 
 Select one of the menu options:
 - `[1] Boost a Server`:
@@ -124,3 +127,4 @@ Select one of the menu options:
 
 ## ⚠️ Disclaimer
 This tool is intended for educational and testing purposes only. Automated interaction with Discord's API violates Discord's Terms of Service. Use responsibly.
+
