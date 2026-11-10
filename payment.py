@@ -192,3 +192,4 @@ def force_complete_invoice(invoice_id: str) -> Tuple[bool, str]:
 
     add_user_balance(inv["user_id"], inv["duration"], inv["boosts"])
     return True, f"Invoice {invoice_id} manually approved! Credited {inv['boosts']}x {inv['duration']} boosts to user <@{inv['user_id']}>."
+
