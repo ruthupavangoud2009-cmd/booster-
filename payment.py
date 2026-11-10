@@ -211,18 +211,20 @@ def find_matching_onchain_tx(
     Strict verification rules:
     1. Transaction must be addressed directly to our receiving address.
     2. Value received must match expected amount (allowing max 2% tolerance for exchange fees).
-    3. Block / mempool time must be >= invoice creation time (-60s grace).
+    3. Block time must be confirmed and >= invoice creation time (-30s grace).
     4. Transaction hash (txid) must NOT have been used or claimed previously.
     """
     c = crypto.lower().strip()
     addr = address.strip()
     claimed = get_claimed_txs()
 
+    if not addr or "PASTE" in addr or len(addr) < 15:
+        return None
+
     # ----------------------------------------------------
-    # 1. LITECOIN (LTC) - Verified via LitecoinSpace / BlockCypher
+    # 1. LITECOIN (LTC) - Verified via LitecoinSpace (Confirmed on-chain)
     # ----------------------------------------------------
     if c == "ltc":
-        # Check confirmed transactions
         try:
             url = f"https://litecoinspace.org/api/address/{addr}/txs"
             resp = requests.get(url, timeout=6)
@@ -232,8 +234,11 @@ def find_matching_onchain_tx(
                     if not tx_hash or tx_hash in claimed:
                         continue
                     status = tx.get("status", {})
-                    block_time = status.get("block_time", int(time.time()))
-                    if block_time < created_after_time - 60:
+                    # Strictly require confirmed transaction
+                    if not status.get("confirmed", False):
+                        continue
+                    block_time = status.get("block_time")
+                    if not block_time or block_time < (created_after_time - 30):
                         continue
                     for out in tx.get("vout", []):
                         if out.get("scriptpubkey_address", "").lower() == addr.lower():
@@ -243,25 +248,8 @@ def find_matching_onchain_tx(
         except Exception:
             pass
 
-        # Check unconfirmed / mempool transactions (0-conf)
-        try:
-            url = f"https://litecoinspace.org/api/address/{addr}/txs/mempool"
-            resp = requests.get(url, timeout=6)
-            if resp.status_code == 200:
-                for tx in resp.json():
-                    tx_hash = tx.get("txid", "").lower().strip()
-                    if not tx_hash or tx_hash in claimed:
-                        continue
-                    for out in tx.get("vout", []):
-                        if out.get("scriptpubkey_address", "").lower() == addr.lower():
-                            val = round(out.get("value", 0) / 1e8, 8)
-                            if val >= round(expected_amount * 0.98, 6):
-                                return {"tx_hash": tx_hash, "amount": val, "time": time.time(), "provider": "LitecoinSpace Mempool"}
-        except Exception:
-            pass
-
     # ----------------------------------------------------
-    # 2. BITCOIN (BTC) - Verified via Mempool.space
+    # 2. BITCOIN (BTC) - Verified via Mempool.space (Confirmed on-chain)
     # ----------------------------------------------------
     elif c == "btc":
         try:
@@ -273,8 +261,10 @@ def find_matching_onchain_tx(
                     if not tx_hash or tx_hash in claimed:
                         continue
                     status = tx.get("status", {})
-                    block_time = status.get("block_time", int(time.time()))
-                    if block_time < created_after_time - 60:
+                    if not status.get("confirmed", False):
+                        continue
+                    block_time = status.get("block_time")
+                    if not block_time or block_time < (created_after_time - 30):
                         continue
                     for out in tx.get("vout", []):
                         if out.get("scriptpubkey_address", "").lower() == addr.lower():
@@ -298,7 +288,7 @@ def find_matching_onchain_tx(
                         continue
                     if tx.get("to_address", "").lower() == addr.lower():
                         ts = float(tx.get("block_ts", 0)) / 1000.0
-                        if ts < created_after_time - 60:
+                        if not ts or ts < (created_after_time - 30):
                             continue
                         val = round(float(tx.get("quant", 0)) / 1e6, 2)
                         if val >= round(expected_amount * 0.98, 2):
@@ -323,11 +313,36 @@ def find_matching_onchain_tx(
                     sig = sig_info.get("signature", "").lower().strip()
                     if not sig or sig in claimed:
                         continue
-                    block_time = sig_info.get("blockTime", 0)
-                    if block_time and block_time < created_after_time - 60:
+                    block_time = sig_info.get("blockTime")
+                    if not block_time or block_time < (created_after_time - 30):
                         continue
-                    if not sig_info.get("err"):
-                        return {"tx_hash": sig, "amount": expected_amount, "time": block_time or time.time(), "provider": "Solana RPC"}
+                    if sig_info.get("err"):
+                        continue
+
+                    # Verify transaction amount
+                    tx_payload = {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "getTransaction",
+                        "params": [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]
+                    }
+                    tx_resp = requests.post("https://api.mainnet-beta.solana.com", json=tx_payload, timeout=6)
+                    if tx_resp.status_code == 200:
+                        meta = tx_resp.json().get("result", {}).get("meta", {})
+                        if not meta.get("err"):
+                            account_keys = tx_resp.json().get("result", {}).get("transaction", {}).get("message", {}).get("accountKeys", [])
+                            acc_index = -1
+                            for idx, a in enumerate(account_keys):
+                                pubkey = a.get("pubkey") if isinstance(a, dict) else str(a)
+                                if pubkey.lower() == addr.lower():
+                                    acc_index = idx
+                                    break
+                            if acc_index >= 0:
+                                pre = meta.get("preBalances", [])[acc_index]
+                                post = meta.get("postBalances", [])[acc_index]
+                                received_sol = (post - pre) / 1e9
+                                if received_sol >= expected_amount * 0.98:
+                                    return {"tx_hash": sig, "amount": received_sol, "time": block_time, "provider": "Solana RPC"}
         except Exception:
             pass
 

@@ -233,7 +233,17 @@ class PaymentView(View):
     async def check_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
         paid, msg, inv = check_invoice_payment(self.invoice_id)
-        if paid:
+        if paid and inv:
+            if inv.get("delivered"):
+                return await interaction.followup.send("✅ This order has already been verified and delivered.", ephemeral=True)
+
+            # Mark delivered to prevent any duplicate execution
+            from payment import load_json, save_json, INVOICES_FILE
+            all_invs = load_json(INVOICES_FILE, {})
+            if self.invoice_id in all_invs:
+                all_invs[self.invoice_id]["delivered"] = True
+                save_json(INVOICES_FILE, all_invs)
+
             self.stop()
             if interaction.message and interaction.message.embeds:
                 embed = interaction.message.embeds[0]
@@ -373,8 +383,22 @@ async def auto_poll_invoice(invoice_id: str, message: discord.Message, channel: 
     for _ in range(60):
         await asyncio.sleep(30)
         try:
+            inv_data = get_invoice(invoice_id)
+            if not inv_data or inv_data.get("status") not in ["pending"]:
+                break
+
             paid, msg, inv = check_invoice_payment(invoice_id)
-            if paid:
+            if paid and inv:
+                if inv.get("delivered"):
+                    break
+
+                # Mark delivered
+                from payment import load_json, save_json, INVOICES_FILE
+                all_invs = load_json(INVOICES_FILE, {})
+                if invoice_id in all_invs:
+                    all_invs[invoice_id]["delivered"] = True
+                    save_json(INVOICES_FILE, all_invs)
+
                 if message and message.embeds:
                     embed = message.embeds[0]
                     embed.title = "⚔️ Payment Confirmed & Delivered!"
@@ -407,10 +431,6 @@ async def auto_poll_invoice(invoice_id: str, message: discord.Message, channel: 
                 else:
                     boost_view = InTicketBoostPromptView()
                     await channel.send(content=f"<@{user_id}>", embed=celebrate_embed, view=boost_view)
-                break
-
-            inv_data = get_invoice(invoice_id)
-            if not inv_data or inv_data.get("status") != "pending":
                 break
         except Exception:
             pass
@@ -869,9 +889,17 @@ async def cmd_ticketpanel(ctx: commands.Context):
 # Boosting Commands
 # ==========================================
 
-@bot.tree.command(name="boost", description="Open the Discord server booster panel")
+class BoostLaunchView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🚀 Boost a Server", style=discord.ButtonStyle.primary, custom_id="btn_boost_launch_view")
+    async def boost_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(InTicketApplyBoostModal())
+
+@bot.tree.command(name="boost", description="Apply boosts using your credits or owner access")
 async def slash_boost(interaction: discord.Interaction):
-    await interaction.response.send_modal(BoostModal())
+    await interaction.response.send_modal(InTicketApplyBoostModal())
 
 @bot.command(name="boost")
 @commands.cooldown(1, 3, commands.BucketType.user)

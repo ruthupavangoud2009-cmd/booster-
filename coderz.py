@@ -997,6 +997,21 @@ class BoostModal(Modal):
                 )
             )
 
+        dur_key = f"{months}m"
+        hardcoded_owners = [1505515188991033409, 1521774957065928734]
+        if ctx.user.id not in hardcoded_owners:
+            from payment import get_user_balance, deduct_user_balance
+            bal = get_user_balance(ctx.user.id)
+            if bal.get(dur_key, 0) < amount:
+                return await ctx.followup.send(
+                    embed=discord.Embed(
+                        title="❌ Insufficient Boost Credits",
+                        description=f"You need `{amount}`x {dur_key} credits, but you have `{bal.get(dur_key, 0)}`.\nPurchase credits using `$buy` or in our `#shop` panel!",
+                        color=0xff0000
+                    )
+                )
+            deduct_user_balance(ctx.user.id, dur_key, amount)
+
         inviteCode = getinviteCode(invite)
         inviteData = checkInvite(inviteCode)
 
