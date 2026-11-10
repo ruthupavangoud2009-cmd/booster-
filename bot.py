@@ -5,7 +5,7 @@ import yaml
 import asyncio
 import discord
 from discord.ext import commands
-from discord.ui import View, Button, Modal, TextInput
+from discord.ui import View, Button, Modal, TextInput, Select
 
 import coderz
 from coderz import BoostModal, getStock, getinviteCode, checkInvite, Booster, remove, create_session_folder
@@ -743,57 +743,245 @@ async def cmd_confirmorder(ctx: commands.Context, invoice_id: str):
     await ctx.send(embed=embed)
 
 # ==========================================
-# Help Command
+# Modular Help System
 # ==========================================
 
-@bot.command(name="help")
-async def cmd_help(ctx: commands.Context):
-    """Show comprehensive help menu."""
-    embed = discord.Embed(title="🤖 Instant Delivery Booster & Shop Bot", color=0x5865F2)
+def get_modular_help_embed(category: str, p: str) -> discord.Embed:
+    """Builds clean, modular help embeds with GitHub-style formatting."""
 
-    embed.add_field(
-        name="🛒 Purchasing & Redeeming",
-        value=(
-            f"`{prefix}buy <1m|3m> <boosts> [invite]` — Auto-buy with LTC (instant boost or code)\n"
-            f"`{prefix}redeem <code>` — Redeem a boost key code\n"
-            f"`{prefix}balance` — Check your available boost credits\n"
-            f"`{prefix}stock` — View available Nitro token stock\n"
-            f"`{prefix}stats` — View total shop sales & revenue"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="🚀 Boosting",
-        value=(
-            f"`{prefix}boost <invite> <amount> <months>` — Boost a server with credits\n"
-            f"`{prefix}boost` — Open the interactive booster panel"
-        ),
-        inline=False
-    )
-
-    if is_owner(ctx.author):
+    if category == "shop":
+        embed = discord.Embed(
+            title="🛒 Module: Auto-Shop & Purchasing",
+            description="Buy boost credits using Litecoin, redeem keys, and manage credits.",
+            color=0x5865F2
+        )
         embed.add_field(
-            name="👑 Owner & Wallet Administration",
+            name=f"⚡ `{p}buy <1m|3m> <amount> [invite] [code:PROMO]`",
             value=(
-                f"`{prefix}wallet` — Live blockchain inspect of linked LTC wallet\n"
-                f"`{prefix}setwallet <address>` — Link a new LTC wallet address\n"
-                f"`{prefix}setprice <1m|3m> <ltc>` — Change prices on the fly\n"
-                f"`{prefix}creatediscount <code> <%>` — Create a discount code\n"
-                f"`{prefix}createcode <1m|3m> <amt>` — Generate free redeemable gift codes\n"
-                f"`{prefix}restock <1m|3m>` — Bulk restock tokens (paste or attach `.txt`)\n"
-                f"`{prefix}addcredits @user <1m|3m> <amt>` — Gift credits manually\n"
-                f"`{prefix}removecredits @user <1m|3m> <amt>` — Deduct credits\n"
-                f"`{prefix}confirmorder <INV-ID>` — Force-approve a pending invoice\n"
-                f"`{prefix}usedtokens` — View count of archived used tokens"
+                "Creates an automated Litecoin invoice with an interactive `[Check Payment]` button.\n"
+                "• **Instant Auto-Boost**: Add your invite link (`$buy 1m 2 discord.gg/example`) to boost immediately upon payment!\n"
+                "• **Promo Codes**: Add a discount (`$buy 1m 2 code:SAVE10`) to get a price reduction."
             ),
             inline=False
         )
-        embed.set_footer(text="👑 Owner Status Active | Unlimited Boosts")
-    else:
-        embed.set_footer(text=f"Use {prefix}buy to purchase boosts with Litecoin")
+        embed.add_field(
+            name=f"🔑 `{p}redeem <KEY-CODE>`",
+            value="Redeem an instant delivery boost code (e.g. `BOOST-1M-2X-ABCD-1234`) to claim credits.",
+            inline=False
+        )
+        embed.add_field(
+            name=f"💳 `{p}balance` *(or `{p}credits`)*",
+            value="Displays your current available 1-Month and 3-Month boost credits.",
+            inline=False
+        )
+        embed.add_field(
+            name=f"📦 `{p}stock`",
+            value="View the bot's real-time Nitro token stock and total boosts available.",
+            inline=False
+        )
+        embed.add_field(
+            name=f"📊 `{p}stats`",
+            value="View total shop sales, revenue earned in LTC, and completed orders.",
+            inline=False
+        )
+        embed.set_footer(text="Use the dropdown menu below to navigate modules")
+        return embed
 
-    await ctx.send(embed=embed)
+    elif category == "boost":
+        embed = discord.Embed(
+            title="🚀 Module: Server Boosting",
+            description="Apply Discord Nitro boosts to any server using credits or owner mode.",
+            color=0x5865F2
+        )
+        embed.add_field(
+            name=f"🎯 `{p}boost <invite> <amount> <months>`",
+            value=(
+                "Directly boosts the target server.\n"
+                "• `<invite>`: Server link or code (e.g. `discord.gg/yourserver` or `yourserver`).\n"
+                "• `<amount>`: Number of boosts (must be an even number: `2`, `4`, `14`).\n"
+                "• `<months>`: Duration (`1` for 1-month tokens, `3` for 3-month tokens).\n"
+                "• *Example*: `{p}boost discord.gg/example 2 1`"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name=f"📱 `{p}boost` *(Interactive Button)*",
+            value="Sends an embed with a **[🚀 Boost a Server]** button that opens a popup form in Discord.",
+            inline=False
+        )
+        embed.add_field(
+            name="⚡ `/boost` *(Slash Command)*",
+            value="Discord slash command that immediately opens the boosting popup modal.",
+            inline=False
+        )
+        embed.set_footer(text="👑 Owners have UNLIMITED boosts | Regular users consume credits")
+        return embed
+
+    elif category == "wallet":
+        embed = discord.Embed(
+            title="🪙 Module: Litecoin & Wallet Management",
+            description="Manage your receiving wallet and inspect blockchain status live.",
+            color=0x5865F2
+        )
+        embed.add_field(
+            name=f"🔍 `{p}wallet`",
+            value=(
+                "Queries the Litecoin blockchain in real-time (Blockchair / BlockCypher).\n"
+                "Displays confirmed balance, total received, transaction count, and live explorer link."
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name=f"📬 `{p}setwallet <ltc_address>` 👑",
+            value="Updates the receiving LTC wallet address on the fly without restarting the bot.",
+            inline=False
+        )
+        embed.add_field(
+            name=f"🏷️ `{p}setprice <1m|3m> <price_in_ltc>` 👑",
+            value="Update the boost pricing dynamically (e.g. `{p}setprice 1m 0.20`).",
+            inline=False
+        )
+        embed.set_footer(text="👑 = Owner Only Command")
+        return embed
+
+    elif category == "admin":
+        embed = discord.Embed(
+            title="👑 Module: Owner & Stock Administration",
+            description="Administrative commands for managing stock, gifts, discounts, and users.",
+            color=0xED4245
+        )
+        embed.add_field(
+            name=f"📥 `{p}restock <1m|3m>`",
+            value=(
+                "Bulk restock Nitro tokens into stock.\n"
+                "• **Text Restock**: `{p}restock 1m token1 token2...`\n"
+                "• **Bulk File Upload**: Attach a `.txt` file containing 100s or 1,000s of tokens!\n"
+                "• *Duplicates are automatically filtered out.*"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name=f"🎁 `{p}createcode <1m|3m> <amount>`",
+            value="Generate free redeemable gift codes (e.g. for giveaways, promos, or manual deals).",
+            inline=False
+        )
+        embed.add_field(
+            name=f"🏷️ `{p}creatediscount <code> <percent_off>`",
+            value="Create promotional discount codes (e.g. `{p}creatediscount SUMMER10 10`).",
+            inline=False
+        )
+        embed.add_field(
+            name=f"➕ `{p}addcredits @user <1m|3m> <amount>`",
+            value="Manually gift or credit boost balance to any Discord user.",
+            inline=False
+        )
+        embed.add_field(
+            name=f"➖ `{p}removecredits @user <1m|3m> <amount>`",
+            value="Deduct boost credits from any user.",
+            inline=False
+        )
+        embed.add_field(
+            name=f"✅ `{p}confirmorder <INV-ID>`",
+            value="Force-approve a pending invoice manually and deliver credits and redeem code.",
+            inline=False
+        )
+        embed.add_field(
+            name=f"🗄️ `{p}usedtokens`",
+            value="View the total count of used/archived tokens that were moved out of stock.",
+            inline=False
+        )
+        embed.set_footer(text="Restricted to hardcoded bot owners [1505515188991033409, 1521774957065928734]")
+        return embed
+
+    else:
+        # Default All-in-One Modular View
+        embed = discord.Embed(
+            title="⚡ Booster & Auto-Shop Bot — Command Menu",
+            description=(
+                f"Welcome to the Booster Bot. All commands are organized below into modular categories.\n"
+                f"Use the **interactive dropdown menu** below to view detailed syntax and examples for any module."
+            ),
+            color=0x5865F2
+        )
+
+        embed.add_field(
+            name="🛒 Auto-Shop & Purchasing",
+            value=(
+                f"• `{p}buy <1m|3m> <amount> [invite]` — Auto-buy with LTC (instant boost or code)\n"
+                f"• `{p}redeem <code>` — Redeem a boost key code\n"
+                f"• `{p}balance` *(or `{p}credits`)* — Check your available boost credits\n"
+                f"• `{p}stock` — View available Nitro token stock\n"
+                f"• `{p}stats` — View total shop sales & revenue"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="🚀 Server Boosting",
+            value=(
+                f"• `{p}boost <invite> <amount> <months>` — Boost a server with credits\n"
+                f"• `{p}boost` — Open the interactive booster panel button\n"
+                f"• `/boost` — Slash command version of the boost popup"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="🪙 Litecoin & Wallet",
+            value=(
+                f"• `{p}wallet` — Live blockchain inspect of linked LTC wallet\n"
+                f"• `{p}setwallet <address>` — 👑 Link a new LTC receiving address\n"
+                f"• `{p}setprice <1m|3m> <ltc>` — 👑 Change boost prices on the fly"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="👑 Owner & Administration",
+            value=(
+                f"• `{p}restock <1m|3m>` — Bulk restock tokens (paste or attach `.txt`)\n"
+                f"• `{p}createcode <1m|3m> <amt>` — Generate free redeemable gift keys\n"
+                f"• `{p}creatediscount <code> <%>` — Create promotional discount codes\n"
+                f"• `{p}addcredits @user <1m|3m> <amt>` — Gift credits manually\n"
+                f"• `{p}removecredits @user <1m|3m> <amt>` — Deduct credits manually\n"
+                f"• `{p}confirmorder <INV-ID>` — Force-approve a pending invoice\n"
+                f"• `{p}usedtokens` — Check count of archived used accounts"
+            ),
+            inline=False
+        )
+
+        embed.set_footer(text=f"Prefix: {p} | Select a category below for full guide & examples")
+        return embed
+
+class HelpDropdown(Select):
+    def __init__(self, p: str):
+        self.p = p
+        options = [
+            discord.SelectOption(label="All Commands Overview", value="all", emoji="🌐", description="View all modules and commands at once"),
+            discord.SelectOption(label="Auto-Shop & Purchasing", value="shop", emoji="🛒", description="Commands for buying, redeeming & credits"),
+            discord.SelectOption(label="Server Boosting", value="boost", emoji="🚀", description="Commands for boosting Discord servers"),
+            discord.SelectOption(label="Litecoin & Wallet", value="wallet", emoji="🪙", description="LTC wallet inspection & pricing"),
+            discord.SelectOption(label="Owner Administration", value="admin", emoji="👑", description="Bulk restock, gift codes, discounts & users")
+        ]
+        super().__init__(placeholder="📂 Select a module to explore...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        embed = get_modular_help_embed(selected, self.p)
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+class ModularHelpView(View):
+    def __init__(self, p: str):
+        super().__init__(timeout=300)
+        self.add_item(HelpDropdown(p))
+
+@bot.command(name="help")
+async def cmd_help(ctx: commands.Context):
+    """Show super clean modular help menu with interactive dropdown."""
+    embed = get_modular_help_embed("all", prefix)
+    view = ModularHelpView(prefix)
+    await ctx.send(embed=embed, view=view)
+
 
 # ==========================================
 # Main Startup
