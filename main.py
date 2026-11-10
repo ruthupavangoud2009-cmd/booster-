@@ -47,6 +47,7 @@ def main():
     
     try:
         from coderz import getinviteCode, checkInvite, getStock, Booster, remove
+        from payment import archive_used_tokens
     except ImportError as e:
         print(f" [!] Error loading bot logic: {e}")
         input(" Press Enter to exit...")
@@ -186,6 +187,9 @@ def main():
     
     status = boost.thread(inviteCode, tokens, inviteData)
     time_taken = round(time.time() - start, 2)
+
+    # Move used tokens to separate file so they are never in stock again
+    archive_used_tokens(tokens, f"{months}m", inviteCode)
 
     success_count = 0
     failed_count = 0

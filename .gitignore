@@ -22,6 +22,11 @@ data/1m.txt
 data/3m.txt
 data/proxies.txt
 data/keys/
+data/used_tokens.txt
+data/used_1m.txt
+data/used_3m.txt
+data/balances.json
+data/invoices.json
 
 
 # Virtual environments & IDEs

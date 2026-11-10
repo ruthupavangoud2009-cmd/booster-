@@ -14,5 +14,12 @@ services:
       - key: PREFIX
         value: "$"
       - key: OWNER_IDS
-        value: "1505515188991033409"
+        value: "1505515188991033409,1521774957065928734"
+      - key: LTC_ADDRESS
+        sync: false
+      - key: PRICE_1M
+        value: "0.25"
+      - key: PRICE_3M
+        value: "0.50"
+
 

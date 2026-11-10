@@ -6,19 +6,25 @@ An automated Discord server boosting and token management tool featuring multi-t
 
 ## ⚡ Features
 
-1. **Server Booster (`Option 1`)**:
-   - Boost any Discord server using 1-month or 3-month Nitro tokens.
-   - Automatically handles server joining, captcha bypass/solving (via CapSolver/HcOptcha), and boost assignment.
-   - 2 boosts applied per Nitro token.
+1. **Auto-Shop & Litecoin (LTC) Payment System**:
+   - Buyers can purchase boost credits with LTC using `$buy <1m|3m> <boosts>`.
+   - Generates dynamic invoice with interactive `[Check Payment]` button.
+   - Automatically monitors the Litecoin blockchain and confirms transactions, crediting users automatically.
 
-2. **Token Onliner (`Option 2`)**:
-   - Keeps your tokens connected via the Discord Gateway websocket.
-   - Displays custom rich presence (Playing, Streaming, Listening, Watching) configured in `config/onliner.json`.
-   - Keeps accounts looking active and prevents offline detection.
+2. **Credits-Based Boosting**:
+   - Buyers spend their boost credits to boost any server (`$boost <invite> <amount> <months>`).
+   - Designated Owners (`1505515188991033409` and `1521774957065928734`) have **unlimited boosts**.
 
-3. **Token Humanizer (`Option 3`)**:
-   - Automatically randomizes profiles for your tokens.
-   - Sets random avatars, banners, bios, pronouns, and HypeSquad houses to make tokens appear authentic.
+3. **Bulk Restock (Text & File Upload)**:
+   - Restock tokens in bulk by pasting or simply attaching a `.txt` file to `$restock <1m|3m>`.
+   - Automatically filters out duplicates against current stock.
+
+4. **Used Account Archiving**:
+   - As soon as accounts are used for boosting, they are automatically moved out of stock and saved to `data/used_tokens.txt` with timestamps and server links.
+
+5. **Token Onliner & Humanizer**:
+   - Keeps accounts online 24/7 with custom rich presence, and randomizes avatars, bios, and badges.
+
 
 ---
 

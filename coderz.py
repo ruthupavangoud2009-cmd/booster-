@@ -25,6 +25,7 @@ from pystyle import Colors, Colorate, Center
 import authsystem
 from logger import info, warn, fail, success, debug
 import logger
+from payment import archive_used_tokens
 
 def create_folder(folder_path):
     if not os.path.exists(folder_path):
@@ -1044,6 +1045,9 @@ class BoostModal(Modal):
         start = time.time()
         status = boost.thread(inviteCode, tokens, inviteData)
         time_taken = round(time.time() - start, 2)
+
+        # Archive used tokens to another file so they don't remain in stock
+        archive_used_tokens(tokens, f"{months}m", inviteCode)
 
         await ctx.followup.send(
             embed=discord.Embed(

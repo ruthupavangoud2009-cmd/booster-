@@ -2,9 +2,15 @@ discord:
   webhook_url: ""
   bot_token: ""         # Paste your Discord Bot Token here (from Discord Developer Portal)
   prefix: "$"           # Command prefix (e.g., $boost)
-  owner_ids: [1505515188991033409] # Hardcoded authorized owner Discord ID
+  owner_ids:
+    - 1505515188991033409
+    - 1521774957065928734
 
-
+ltc:
+  address: "PASTE_YOUR_LTC_ADDRESS_HERE"  # Your Litecoin receiving address
+  price_per_boost_1m: 0.25               # LTC per 1-month boost (e.g. 2 boosts = 0.5 LTC)
+  price_per_boost_3m: 0.50               # LTC per 3-month boost
+  min_confirmations: 1                   # Confirmations required (0 for 0-conf mempool, 1 for 1 block)
 
 extras:
   use_log: true
