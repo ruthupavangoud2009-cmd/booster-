@@ -121,6 +121,12 @@ async def init_database():
         key VARCHAR(64) PRIMARY KEY,
         value TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS daily_streaks (
+        user_id BIGINT PRIMARY KEY,
+        streak INT DEFAULT 1,
+        last_claimed DOUBLE PRECISION
+    );
     """
     try:
         async with pool.acquire() as conn:
@@ -299,6 +305,107 @@ async def set_setting_db(key: str, value: str):
     settings[key] = value
     with open(settings_file, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
+
+async def get_all_guild_prefixes_db() -> Dict[int, str]:
+    """Loads all custom guild prefixes into a memory dict."""
+    prefixes: Dict[int, str] = {}
+    pool = await get_pg_pool()
+    if pool and _db_connected:
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT key, value FROM bot_settings WHERE key LIKE 'guild_%_prefix';")
+                for r in rows:
+                    parts = r["key"].split("_")
+                    if len(parts) >= 3 and parts[1].isdigit():
+                        prefixes[int(parts[1])] = r["value"]
+        except Exception:
+            pass
+
+    settings_file = "data/settings.json"
+    if os.path.exists(settings_file):
+        try:
+            with open(settings_file, "r", encoding="utf-8") as f:
+                s = json.load(f)
+            for k, v in s.items():
+                if k.startswith("guild_") and k.endswith("_prefix"):
+                    parts = k.split("_")
+                    if len(parts) >= 3 and parts[1].isdigit():
+                        prefixes[int(parts[1])] = v
+        except Exception:
+            pass
+    return prefixes
+
+# ==========================================
+# Daily Streak & Community Loyalty
+# ==========================================
+
+async def get_daily_streak_db(user_id: int) -> Dict[str, Any]:
+    pool = await get_pg_pool()
+    if pool and _db_connected:
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT streak, last_claimed FROM daily_streaks WHERE user_id = $1;", user_id)
+                if row:
+                    return {"streak": int(row["streak"]), "last_claimed": float(row["last_claimed"])}
+        except Exception:
+            pass
+
+    streaks_file = "data/daily_streaks.json"
+    if os.path.exists(streaks_file):
+        try:
+            with open(streaks_file, "r", encoding="utf-8") as f:
+                return json.load(f).get(str(user_id), {"streak": 0, "last_claimed": 0.0})
+        except Exception:
+            pass
+    return {"streak": 0, "last_claimed": 0.0}
+
+async def claim_daily_streak_db(user_id: int) -> Tuple[bool, str, int, Optional[str]]:
+    now = time.time()
+    current = await get_daily_streak_db(user_id)
+    last = current.get("last_claimed", 0.0)
+    streak = current.get("streak", 0)
+
+    seconds_passed = now - last
+    if seconds_passed < 86400 and last > 0:
+        remaining = 86400 - seconds_passed
+        hours = int(remaining // 3600)
+        mins = int((remaining % 3600) // 60)
+        return False, f"⏳ You already claimed today's reward! Next claim available in **`{hours}h {mins}m`**.", streak, None
+
+    if seconds_passed > 172800 and last > 0:
+        new_streak = 1
+    else:
+        new_streak = (streak % 7) + 1
+
+    pool = await get_pg_pool()
+    if pool and _db_connected:
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO daily_streaks (user_id, streak, last_claimed)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (user_id) DO UPDATE SET streak = $2, last_claimed = $3;
+                    """,
+                    user_id, new_streak, now
+                )
+        except Exception:
+            pass
+
+    os.makedirs("data", exist_ok=True)
+    streaks_file = "data/daily_streaks.json"
+    data = {}
+    if os.path.exists(streaks_file):
+        try:
+            with open(streaks_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data[str(user_id)] = {"streak": new_streak, "last_claimed": now}
+    with open(streaks_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+    return True, "Success", new_streak, f"day_{new_streak}"
 
 # ==========================================
 # Full Database Synchronization

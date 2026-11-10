@@ -47,7 +47,10 @@ from database import (
     get_recent_reviews_db,
     get_setting_db,
     set_setting_db,
-    is_db_connected
+    is_db_connected,
+    get_daily_streak_db,
+    claim_daily_streak_db,
+    get_all_guild_prefixes_db
 )
 from tickets import (
     load_tickets_db,
@@ -145,17 +148,21 @@ NO_PREFIX_COMMANDS = {
     "balance", "bal", "credits", "wallet", "wallets", "redeem", "ticket", "tickets",
     "uptime", "stats", "botinfo", "serverinfo", "userinfo", "whoami", "avatar", "av", "pfp",
     "clear", "purge", "vouch", "review", "reviews", "vouches", "setreviewchannel",
-    "orders", "myorders", "vip", "loyalty", "transfer", "sendcredits", "top", "leaderboard", "promos", "discounts", "setlogchannel"
+    "orders", "myorders", "vip", "loyalty", "transfer", "sendcredits", "top", "leaderboard", "promos", "discounts", "setlogchannel",
+    "setup", "checkserver", "calc", "daily", "faq", "guide", "setprefix", "broadcast"
 }
 
+_guild_prefixes: dict = {}
+
 def determine_prefix(bot_instance, message):
+    p = _guild_prefixes.get(message.guild.id, prefix) if message.guild else prefix
     if not message.content:
-        return [prefix]
+        return [p]
     content = message.content.strip().lower()
     first_word = content.split()[0] if content.split() else ""
     if first_word in NO_PREFIX_COMMANDS:
-        return ["", prefix]
-    return [prefix]
+        return ["", p]
+    return [p]
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -1123,6 +1130,9 @@ async def on_ready():
     # Initialize Supabase PostgreSQL Database & sync records
     try:
         await init_database()
+        loaded_prefixes = await get_all_guild_prefixes_db()
+        _guild_prefixes.update(loaded_prefixes)
+        print(f" [+] Loaded {len(_guild_prefixes)} Custom Server Prefixes.")
     except Exception as e:
         print(f" [~] Database init exception: {e}")
 
@@ -1456,6 +1466,484 @@ async def cmd_promos(ctx: commands.Context):
     )
     embed.set_footer(text=f"Use in checkout: {prefix}buy 1m 2 ltc code:CODE")
     await ctx.send(embed=embed)
+
+# ==========================================
+# Server Setup Wizard, FAQ, Calculator & Streaks
+# ==========================================
+
+def fetch_server_invite_details(invite_str: str) -> Optional[dict]:
+    """Fetches public server info from Discord API invite endpoint."""
+    code = getinviteCode(invite_str)
+    if not code:
+        return None
+    try:
+        url = f"https://discord.com/api/v9/invites/{code}?with_counts=true&with_expiration=true"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        g = data.get("guild", {})
+        if not g:
+            return None
+
+        boost_count = int(g.get("premium_subscription_count") or 0)
+        if boost_count >= 14:
+            tier = 3
+            needed_l1 = 0
+            needed_l2 = 0
+            needed_l3 = 0
+            next_tier_desc = "Max Tier 3 (Level 3) Reached! 🎉"
+        elif boost_count >= 7:
+            tier = 2
+            needed_l1 = 0
+            needed_l2 = 0
+            needed_l3 = 14 - boost_count
+            next_tier_desc = f"Need **{needed_l3} more boosts** to reach Level 3 (14 boosts)"
+        elif boost_count >= 2:
+            tier = 1
+            needed_l1 = 0
+            needed_l2 = 7 - boost_count
+            needed_l3 = 14 - boost_count
+            next_tier_desc = f"Need **{needed_l2} more boosts** to reach Level 2 (7 boosts)"
+        else:
+            tier = 0
+            needed_l1 = 2 - boost_count
+            needed_l2 = 7 - boost_count
+            needed_l3 = 14 - boost_count
+            next_tier_desc = f"Need **{needed_l1} more boosts** to reach Level 1 (2 boosts)"
+
+        icon_id = g.get("icon")
+        guild_id = g.get("id")
+        icon_url = f"https://cdn.discordapp.com/icons/{guild_id}/{icon_id}.png" if icon_id and guild_id else None
+
+        return {
+            "code": code,
+            "guild_id": guild_id,
+            "name": g.get("name", "Unknown Server"),
+            "boost_count": boost_count,
+            "tier": tier,
+            "members": data.get("approximate_member_count", 0),
+            "online": data.get("approximate_presence_count", 0),
+            "next_tier_desc": next_tier_desc,
+            "needed_l1": needed_l1,
+            "needed_l2": needed_l2,
+            "needed_l3": needed_l3,
+            "icon_url": icon_url
+        }
+    except Exception:
+        return None
+
+class SetupWizardView(View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="⚡ 1-Click Instant Auto Deploy", style=discord.ButtonStyle.success, custom_id="btn_setup_autodeploy", row=0)
+    async def btn_autodeploy(self, interaction: discord.Interaction, button: Button):
+        if not interaction.user.guild_permissions.administrator and not is_owner(interaction.user):
+            return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        if not guild:
+            return await interaction.followup.send("❌ Must be used within a server.", ephemeral=True)
+
+        # 1. Shop Category
+        shop_cat = discord.utils.get(guild.categories, name="🛒 ── SHOP & SERVICES ──")
+        if not shop_cat:
+            try:
+                shop_cat = await guild.create_category(name="🛒 ── SHOP & SERVICES ──")
+            except Exception:
+                shop_cat = None
+
+        overwrites_readonly = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False, add_reactions=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True, attach_files=True)
+        }
+
+        # Create or find channels
+        shop_ch = discord.utils.get(guild.text_channels, name="🛒・shop")
+        if not shop_ch:
+            shop_ch = await guild.create_text_channel(name="🛒・shop", category=shop_cat, overwrites=overwrites_readonly)
+
+        vouch_ch = discord.utils.get(guild.text_channels, name="⭐・vouches")
+        if not vouch_ch:
+            vouch_ch = await guild.create_text_channel(name="⭐・vouches", category=shop_cat, overwrites=overwrites_readonly)
+
+        logs_ch = discord.utils.get(guild.text_channels, name="📋・order-logs")
+        if not logs_ch:
+            logs_ch = await guild.create_text_channel(name="📋・order-logs", category=shop_cat, overwrites=overwrites_readonly)
+
+        # 2. Tickets Category & Channel
+        tickets_cat = discord.utils.get(guild.categories, name="🎫 ── TICKETS ──")
+        if not tickets_cat:
+            try:
+                tickets_cat = await guild.create_category(name="🎫 ── TICKETS ──")
+            except Exception:
+                tickets_cat = None
+
+        ticket_panel_ch = discord.utils.get(guild.text_channels, name="🎫・tickets")
+        if not ticket_panel_ch:
+            ticket_panel_ch = await guild.create_text_channel(name="🎫・tickets", category=tickets_cat, overwrites=overwrites_readonly)
+
+        # Deploy Shop Panel
+        t1m = len(getStock("data/1m.txt") or [])
+        t3m = len(getStock("data/3m.txt") or [])
+        stats = await get_reviews_stats_db()
+        shop_embed = discord.Embed(
+            title="⚔️ ── SŌSUKE AIZEN | THE THRONE ── ⚔️",
+            description=(
+                f"*\"No one stands on the heavens from the beginning. Neither you, nor I, not even God.\"*\n\n"
+                f"Welcome to the **Official Discord Server Boosting & Services Portal**.\n"
+                f"Instant automated delivery, multi-crypto payments, and 24/7 reliability.\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"**💎 Available Products**:\n"
+                f"◈ **1-Month Boosts**: Level 1 (2x) • Level 2 (7x) • Level 3 (14x)\n"
+                f"◈ **3-Month Boosts**: Long-term boost packages\n\n"
+                f"**🪙 Supported Crypto**: `LTC` • `USDT` • `BTC` • `SOL`\n"
+                f"**📦 Live Stock**: `{t1m * 2}` 1m Boosts | `{t3m * 2}` 3m Boosts\n"
+                f"**⭐ Customer Rating**: `⭐ {stats['average_rating']} / 5.0` (`{stats['total_reviews']}` Verified Vouches)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Click a button below to begin your purchase or open a consultation ticket."
+            ),
+            color=AIZEN_COLOR
+        )
+        shop_embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine | 100% Automated")
+        await shop_ch.send(embed=shop_embed, view=ShopPanelView())
+
+        # Deploy Ticket Desk
+        t_embed = discord.Embed(
+            title="🎫 ── AIZEN CONSULTATION & ASSISTANCE ── 🎫",
+            description=(
+                f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+                f"Need assistance, bulk boost packages, or custom payment options?\n"
+                f"Select a topic from the dropdown below to create a private ticket."
+            ),
+            color=AIZEN_COLOR
+        )
+        t_embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+        await ticket_panel_ch.send(embed=t_embed, view=TicketTopicLaunchView(bot, HARDCODED_OWNERS))
+
+        # Save channel settings to database
+        await set_setting_db(f"guild_{guild.id}_review_channel", str(vouch_ch.id))
+        await set_setting_db(f"guild_{guild.id}_order_log_channel", str(logs_ch.id))
+
+        summary_embed = discord.Embed(
+            title="🎉 Server Setup Successfully Completed!",
+            description=(
+                f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+                f"Your Aizen Shop & Boosting Desk is fully deployed and active:\n\n"
+                f"• 🛒 **Shop Panel**: {shop_ch.mention}\n"
+                f"• 🎫 **Tickets Desk**: {ticket_panel_ch.mention}\n"
+                f"• ⭐ **Review Channel**: {vouch_ch.mention}\n"
+                f"• 📋 **Order Logs**: {logs_ch.mention}\n\n"
+                f"All permissions and automated database routes are ready!"
+            ),
+            color=AIZEN_ACCENT
+        )
+        summary_embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+        await interaction.followup.send(embed=summary_embed, ephemeral=True)
+
+class FAQDropdown(Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="1. How to Buy & Instant Auto-Delivery", value="faq_buy", emoji="⚡", description="Step-by-step guide to instant server boosts"),
+            discord.SelectOption(label="2. Supported Cryptos & Fees", value="faq_crypto", emoji="🪙", description="LTC, USDT, BTC, SOL payment details"),
+            discord.SelectOption(label="3. Boost Duration & Server Safety", value="faq_duration", emoji="🛡️", description="How long boosts last and Discord compliance"),
+            discord.SelectOption(label="4. Balance & Redeemable Gift Keys", value="faq_keys", emoji="🔑", description="How to store credits and redeem gift codes"),
+            discord.SelectOption(label="5. VIP Loyalty Rewards & Discounts", value="faq_vip", emoji="💎", description="Automatic savings tiers up to 10% off"),
+            discord.SelectOption(label="6. Daily Rewards & Streaks", value="faq_daily", emoji="🎁", description="Free daily coupons and boost rewards"),
+        ]
+        super().__init__(placeholder="❓ Select a topic to view details...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        if choice == "faq_buy":
+            title = "⚡ How to Buy & Instant Auto-Delivery"
+            desc = (
+                "**1.** Click **Buy Server Boosts** in `/shoppanel` or type `/buy`.\n"
+                "**2.** Select boost amount (`2`, `4`, `14`, etc.) and duration (`1m` or `3m`).\n"
+                "**3.** Optionally paste your server invite to boost automatically upon payment!\n"
+                "**4.** Send the exact crypto amount to the provided wallet address.\n"
+                "**5.** As soon as the blockchain confirms the transaction, your boosts are delivered instantly!"
+            )
+        elif choice == "faq_crypto":
+            title = "🪙 Supported Cryptocurrencies & Fees"
+            desc = (
+                "• **Litecoin (LTC)**: Recommended! Lowest fees (<$0.01) and fast 1-confirmation delivery.\n"
+                "• **Tether USDT (TRC20)**: Zero price volatility stablecoin pegged 1:1 to USD.\n"
+                "• **Bitcoin (BTC)**: Standard Bitcoin network transactions.\n"
+                "• **Solana (SOL)**: Ultra-fast transactions on Solana."
+            )
+        elif choice == "faq_duration":
+            title = "🛡️ Boost Duration & Server Safety"
+            desc = (
+                "• **1-Month Boosts**: Keep your server boosted with full perks for 30+ days.\n"
+                "• **3-Month Boosts**: Extended long-term boosting for 90+ days.\n"
+                "• **Server Perks**: Custom banner, vanity URL (`.gg/yourname`), 100MB+ upload limits, and 384Kbps HD audio!\n"
+                "• **100% Safe**: Boosting applies standard Discord Nitro boosts directly to your guild."
+            )
+        elif choice == "faq_keys":
+            title = "🔑 Balance & Redeemable Gift Keys"
+            desc = (
+                "• If you don't enter an invite during checkout, your boost credits are safely deposited to your `/balance`.\n"
+                "• You can hold credits as long as you want and use `/boost` whenever you are ready!\n"
+                "• You can also generate gift keys (`/createcode`) or transfer credits to friends (`/transfer`)."
+            )
+        elif choice == "faq_vip":
+            title = "💎 VIP Loyalty Rewards & Discounts"
+            desc = (
+                "Every purchase automatically advances your VIP rank:\n"
+                "• 🥉 **Bronze** (1+ orders)\n"
+                "• 🥈 **Silver** (10+ boosts): 2% off\n"
+                "• 🥇 **Gold** (30+ boosts): 5% off + Priority queue\n"
+                "• 💎 **Diamond Sovereign** (100+ boosts): 10% off + Instant priority\n"
+                "Check your status anytime with `/vip`!"
+            )
+        else:
+            title = "🎁 Daily Rewards & Streaks"
+            desc = (
+                "• Type `/daily` once every 24 hours to claim your daily streak reward!\n"
+                "• Rewards include free promotional discount codes (3% to 15% off) and bonus boost credits!\n"
+                "• Maintain your 7-day streak to unlock maximum rewards."
+            )
+
+        embed = discord.Embed(title=title, description=f"*\"No one stands on the heavens from the beginning.\"*\n\n{desc}", color=AIZEN_COLOR)
+        embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Knowledge Base")
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+class FAQView(View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.add_item(FAQDropdown())
+
+@bot.command(name="setup")
+@commands.has_permissions(administrator=True)
+async def cmd_setup(ctx: commands.Context):
+    """Launch the interactive Aizen Server Setup Wizard."""
+    embed = discord.Embed(
+        title="⚡ Sōsuke Aizen — 1-Click Server Setup Wizard",
+        description=(
+            f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+            f"Welcome, **{ctx.author.name}**! Configure your server in seconds:\n\n"
+            f"Click **[⚡ 1-Click Instant Auto Deploy]** below to automatically create:\n"
+            f"• `#🛒・shop` (Interactive visual shop panel)\n"
+            f"• `#🎫・tickets` (Support & custom order consultation desk)\n"
+            f"• `#⭐・vouches` (Automated customer review publishing)\n"
+            f"• `#📋・order-logs` (Automated verified purchase receipts)\n\n"
+            f"All channel permissions, categories, and database links will be configured automatically."
+        ),
+        color=AIZEN_ACCENT
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await ctx.send(embed=embed, view=SetupWizardView())
+
+@bot.command(name="checkserver", aliases=["servercheck", "boosttier", "tiercheck"])
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_checkserver(ctx: commands.Context, invite: str = None):
+    """Inspect any Discord server's current boost level, count, and needed boosts."""
+    if not invite:
+        p = _guild_prefixes.get(ctx.guild.id, prefix) if ctx.guild else prefix
+        return await ctx.send(f"❌ Usage: `{p}checkserver <discord.gg/invite_code>`")
+
+    details = fetch_server_invite_details(invite)
+    if not details:
+        return await ctx.send("❌ Could not reach Discord server. Please verify the invite code is valid and active.")
+
+    p = _guild_prefixes.get(ctx.guild.id, prefix) if ctx.guild else prefix
+    l1_status = "✅ Reached" if details["needed_l1"] == 0 else f"Need {details['needed_l1']} boosts"
+    l2_status = "✅ Reached" if details["needed_l2"] == 0 else f"Need {details['needed_l2']} boosts"
+    l3_status = "✅ Reached" if details["needed_l3"] == 0 else f"Need {details['needed_l3']} boosts"
+
+    embed = discord.Embed(
+        title=f"🏰 {details['name']} — Server Boost Inspection",
+        description=(
+            f"*\"Since when were you under the impression...\"*\n\n"
+            f"◈ **Current Boost Tier**: `Level {details['tier']}`\n"
+            f"◈ **Active Boosts**: `{details['boost_count']}` boosts\n"
+            f"◈ **Server Members**: `{details['members']}` (`{details['online']}` online)\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**🎯 Progression & Quota Needed**:\n"
+            f"{details['next_tier_desc']}\n\n"
+            f"• **Level 1 (2 Boosts)**: {l1_status}\n"
+            f"• **Level 2 (7 Boosts)**: {l2_status}\n"
+            f"• **Level 3 (14 Boosts)**: {l3_status}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Type `{p}buy 1m {details['needed_l3'] or 2} ltc .gg/{details['code']}` to boost!"
+        ),
+        color=AIZEN_COLOR
+    )
+    if details.get("icon_url"):
+        embed.set_thumbnail(url=details["icon_url"])
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="calc", aliases=["calculate", "pricing"])
+@commands.cooldown(1, 2, commands.BucketType.user)
+async def cmd_calc(ctx: commands.Context, duration: str = "1m", amount: int = 2, discount_code: Optional[str] = None):
+    """Calculate multi-crypto pricing for any boost package."""
+    p = _guild_prefixes.get(ctx.guild.id, prefix) if ctx.guild else prefix
+    dur_clean = duration.lower().strip()
+    if dur_clean not in ["1m", "3m"]:
+        return await ctx.send("❌ Duration must be `1m` or `3m`.")
+    if amount <= 0 or amount % 2 != 0:
+        return await ctx.send("❌ Amount must be an even positive number (2 boosts per token).")
+
+    r_ltc = round(get_rate_for_crypto("ltc", dur_clean) * amount, 4)
+    r_usdt = round(get_rate_for_crypto("usdt", dur_clean) * amount, 2)
+    r_btc = round(get_rate_for_crypto("btc", dur_clean) * amount, 6)
+    r_sol = round(get_rate_for_crypto("sol", dur_clean) * amount, 4)
+
+    discount_pct = get_discount_percent(discount_code) if discount_code else 0.0
+    if discount_pct > 0:
+        r_ltc = round(r_ltc * (1 - discount_pct / 100), 4)
+        r_usdt = round(r_usdt * (1 - discount_pct / 100), 2)
+        r_btc = round(r_btc * (1 - discount_pct / 100), 6)
+        r_sol = round(r_sol * (1 - discount_pct / 100), 4)
+
+    t1m = len(getStock("data/1m.txt") or [])
+    t3m = len(getStock("data/3m.txt") or [])
+    tokens_needed = amount // 2
+    stock_avail = t1m if dur_clean == "1m" else t3m
+    stock_status = f"✅ In Stock ({stock_avail * 2} boosts available)" if stock_avail >= tokens_needed else f"⚠️ Low Stock ({stock_avail * 2} available)"
+
+    embed = discord.Embed(
+        title=f"🧮 Multi-Crypto Price Calculator — {amount}x {dur_clean.upper()}",
+        description=(
+            f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+            f"◈ **Package**: `{amount}`x {dur_clean.upper()} Discord Server Boosts\n"
+            f"◈ **Tokens Required**: `{tokens_needed}` accounts\n"
+            f"◈ **Stock Status**: {stock_status}\n"
+            + (f"◈ **Discount Applied**: `{int(discount_pct)}% OFF` (`{discount_code}`)\n" if discount_pct else "")
+            + f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**Estimated Costs by Cryptocurrency**:\n"
+            f"• 🪙 **Litecoin (LTC)**: **`{r_ltc} LTC`** *(Lowest network fees)*\n"
+            f"• 💵 **Tether USDT**: **`${r_usdt} USDT`** *(Zero volatility)*\n"
+            f"• ₿ **Bitcoin (BTC)**: **`{r_btc} BTC`**\n"
+            f"• 🟣 **Solana (SOL)**: **`{r_sol} SOL`**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Type `/buy` or `{p}buy {dur_clean} {amount}` to order!"
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="daily", aliases=["streak", "reward"])
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_daily(ctx: commands.Context):
+    """Claim your daily streak reward for discounts and free credits."""
+    success, msg, streak, reward_type = await claim_daily_streak_db(ctx.author.id)
+    if not success:
+        return await ctx.send(msg)
+
+    if streak == 7:
+        discount_code = f"STREAK7-{ctx.author.id % 10000}"
+        create_discount(discount_code, 15.0)
+        add_user_balance(ctx.author.id, "1m", 2)
+        reward_desc = f"🎉 **7-DAY STREAK COMPLETED!**\n• **2x 1-Month Boost Credits** added to your balance!\n• **15% OFF Promo Code**: `{discount_code}`"
+    elif streak >= 5:
+        discount_code = f"STREAK5-{ctx.author.id % 10000}"
+        create_discount(discount_code, 10.0)
+        reward_desc = f"🔥 **Day {streak} Streak!**\n• **10% OFF Promo Code**: `{discount_code}`"
+    elif streak >= 3:
+        discount_code = f"STREAK3-{ctx.author.id % 10000}"
+        create_discount(discount_code, 5.0)
+        reward_desc = f"⚡ **Day {streak} Streak!**\n• **5% OFF Promo Code**: `{discount_code}`"
+    else:
+        discount_code = f"STREAK-{ctx.author.id % 10000}"
+        create_discount(discount_code, 3.0)
+        reward_desc = f"🌱 **Day {streak} Streak!**\n• **3% OFF Promo Code**: `{discount_code}`"
+
+    embed = discord.Embed(
+        title=f"🎁 Daily Streak Claimed — Day {streak}/7",
+        description=(
+            f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+            f"{reward_desc}\n\n"
+            f"Come back tomorrow to keep your streak alive and unlock higher rewards!"
+        ),
+        color=AIZEN_ACCENT
+    )
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Daily Loyalty")
+    await ctx.send(embed=embed)
+
+@bot.command(name="faq", aliases=["guide", "helpfaq"])
+async def cmd_faq(ctx: commands.Context):
+    """Open the interactive Buyer's FAQ and Guide."""
+    embed = discord.Embed(
+        title="📖 Sōsuke Aizen — Buyer's Knowledge Base & FAQ",
+        description=(
+            f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+            f"Select a topic from the dropdown menu below to learn how our automated boosting system works."
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await ctx.send(embed=embed, view=FAQView())
+
+@bot.command(name="setprefix")
+@commands.has_permissions(administrator=True)
+async def cmd_setprefix(ctx: commands.Context, new_prefix: str = None):
+    """Change the bot's command prefix for this server."""
+    if not new_prefix or len(new_prefix) > 5:
+        p = _guild_prefixes.get(ctx.guild.id, prefix) if ctx.guild else prefix
+        return await ctx.send(f"❌ Please provide a valid prefix between 1 and 5 characters (e.g. `{p}setprefix !`).")
+
+    _guild_prefixes[ctx.guild.id] = new_prefix
+    await set_setting_db(f"guild_{ctx.guild.id}_prefix", new_prefix)
+
+    embed = discord.Embed(
+        title="⚙️ Server Prefix Updated",
+        description=f"✅ Prefix for **{ctx.guild.name}** updated to: `{new_prefix}`\nExample: `{new_prefix}help` or `{new_prefix}shop`",
+        color=AIZEN_ACCENT
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="broadcast", aliases=["announce"])
+async def cmd_broadcast(ctx: commands.Context, *, message: str = None):
+    """Broadcast an official announcement to all servers (Owner Only)."""
+    if not is_owner(ctx.author):
+        return await ctx.send("❌ Unauthorized.")
+    if not message:
+        p = _guild_prefixes.get(ctx.guild.id, prefix) if ctx.guild else prefix
+        return await ctx.send(f"❌ Usage: `{p}broadcast <message>`")
+
+    embed = discord.Embed(
+        title="📢 Sōsuke Aizen — Official Announcement",
+        description=f"*\"No one stands on the heavens from the beginning.\"*\n\n{message}",
+        color=AIZEN_ACCENT
+    )
+    embed.set_footer(text="Official Broadcast • Kyōka Suigetsu Engine")
+    embed.timestamp = discord.utils.utcnow()
+
+    sent = 0
+    for guild in bot.guilds:
+        target_ch = None
+        shop_id = await get_setting_db(f"guild_{guild.id}_order_log_channel")
+        if shop_id:
+            try:
+                target_ch = guild.get_channel(int(shop_id))
+            except Exception:
+                pass
+        if not target_ch:
+            for ch in guild.text_channels:
+                if any(w in ch.name.lower() for w in ["announcements", "updates", "shop", "general"]):
+                    if ch.permissions_for(guild.me).send_messages:
+                        target_ch = ch
+                        break
+        if not target_ch:
+            for ch in guild.text_channels:
+                if ch.permissions_for(guild.me).send_messages:
+                    target_ch = ch
+                    break
+        if target_ch:
+            try:
+                await target_ch.send(embed=embed)
+                sent += 1
+            except Exception:
+                pass
+
+    await ctx.send(f"📢 Broadcast sent to `{sent}` servers.")
 
 # ==========================================
 # Boosting Commands
@@ -2240,6 +2728,12 @@ def get_modular_help_embed(category: str, p: str) -> discord.Embed:
             description="Basic bot commands, diagnostics, and server tools (usable with or without prefix!).",
             color=AIZEN_COLOR
         )
+        embed.add_field(name=f"⚡ `{p}setup` 👑", value="1-Click Server Setup Wizard (auto-deploys shop, tickets, reviews & logs).", inline=False)
+        embed.add_field(name=f"🏰 `{p}checkserver <invite>`", value="Inspect any server's boost tier, member count, and needed boosts.", inline=False)
+        embed.add_field(name=f"🧮 `{p}calc <1m|3m> <amt>`", value="Calculate multi-crypto pricing with live discounts for any package.", inline=False)
+        embed.add_field(name=f"🎁 `{p}daily`", value="Claim daily streak rewards for free discount codes and credits.", inline=False)
+        embed.add_field(name=f"📖 `{p}faq` *(or `{p}guide`)*", value="Interactive Buyer's Knowledge Base & FAQ.", inline=False)
+        embed.add_field(name=f"⚙️ `{p}setprefix <prefix>` 👑", value="Change the bot's command prefix for this server.", inline=False)
         embed.add_field(name=f"🏓 `{p}ping` *(or just `ping`)*", value="View WebSocket latency, REST API roundtrip, and system uptime.", inline=False)
         embed.add_field(name=f"⏱️ `{p}uptime` *(or just `uptime`)*", value="Check continuous 24/7 online duration.", inline=False)
         embed.add_field(name=f"🏰 `{p}serverinfo` *(or just `serverinfo`)*", value="Display server statistics, member counts, and Discord boost tier.", inline=False)
@@ -2861,6 +3355,220 @@ async def slash_setlogchannel(interaction: discord.Interaction, channel: discord
         color=AIZEN_ACCENT
     )
     await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="setup", description="Launch the 1-click interactive server setup wizard (Admin only)")
+async def slash_setup(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator and not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+    embed = discord.Embed(
+        title="⚡ Sōsuke Aizen — 1-Click Server Setup Wizard",
+        description=(
+            f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+            f"Click **[⚡ 1-Click Instant Auto Deploy]** below to automatically create:\n"
+            f"• `#🛒・shop` (Interactive visual shop panel)\n"
+            f"• `#🎫・tickets` (Support & custom order consultation desk)\n"
+            f"• `#⭐・vouches` (Automated customer review publishing)\n"
+            f"• `#📋・order-logs` (Automated verified purchase receipts)\n\n"
+            f"All channel permissions, categories, and database links will be configured automatically."
+        ),
+        color=AIZEN_ACCENT
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed, view=SetupWizardView(), ephemeral=True)
+
+@bot.tree.command(name="checkserver", description="Inspect any Discord server's current boost level, count, and needed boosts")
+@app_commands.describe(invite="Discord invite link or code (e.g. discord.gg/example or example)")
+async def slash_checkserver(interaction: discord.Interaction, invite: str):
+    details = fetch_server_invite_details(invite)
+    if not details:
+        return await interaction.response.send_message("❌ Could not reach Discord server. Please verify the invite code is valid and active.", ephemeral=True)
+
+    l1_status = "✅ Reached" if details["needed_l1"] == 0 else f"Need {details['needed_l1']} boosts"
+    l2_status = "✅ Reached" if details["needed_l2"] == 0 else f"Need {details['needed_l2']} boosts"
+    l3_status = "✅ Reached" if details["needed_l3"] == 0 else f"Need {details['needed_l3']} boosts"
+
+    embed = discord.Embed(
+        title=f"🏰 {details['name']} — Server Boost Inspection",
+        description=(
+            f"*\"Since when were you under the impression...\"*\n\n"
+            f"◈ **Current Boost Tier**: `Level {details['tier']}`\n"
+            f"◈ **Active Boosts**: `{details['boost_count']}` boosts\n"
+            f"◈ **Server Members**: `{details['members']}` (`{details['online']}` online)\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**🎯 Progression & Quota Needed**:\n"
+            f"{details['next_tier_desc']}\n\n"
+            f"• **Level 1 (2 Boosts)**: {l1_status}\n"
+            f"• **Level 2 (7 Boosts)**: {l2_status}\n"
+            f"• **Level 3 (14 Boosts)**: {l3_status}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Use `/buy` to apply boosts directly to `.gg/{details['code']}`!"
+        ),
+        color=AIZEN_COLOR
+    )
+    if details.get("icon_url"):
+        embed.set_thumbnail(url=details["icon_url"])
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="calc", description="Calculate multi-crypto pricing for any boost package")
+@app_commands.describe(duration="1m or 3m", amount="Amount of boosts (must be an even number: 2, 4, 14...)", discount="Discount code (optional)")
+@app_commands.choices(duration=[app_commands.Choice(name="1 Month", value="1m"), app_commands.Choice(name="3 Months", value="3m")])
+async def slash_calc(interaction: discord.Interaction, duration: app_commands.Choice[str], amount: int, discount: Optional[str] = None):
+    if amount <= 0 or amount % 2 != 0:
+        return await interaction.response.send_message("❌ Amount must be an even positive number (2 boosts per token).", ephemeral=True)
+
+    dur_clean = duration.value
+    r_ltc = round(get_rate_for_crypto("ltc", dur_clean) * amount, 4)
+    r_usdt = round(get_rate_for_crypto("usdt", dur_clean) * amount, 2)
+    r_btc = round(get_rate_for_crypto("btc", dur_clean) * amount, 6)
+    r_sol = round(get_rate_for_crypto("sol", dur_clean) * amount, 4)
+
+    discount_pct = get_discount_percent(discount) if discount else 0.0
+    if discount_pct > 0:
+        r_ltc = round(r_ltc * (1 - discount_pct / 100), 4)
+        r_usdt = round(r_usdt * (1 - discount_pct / 100), 2)
+        r_btc = round(r_btc * (1 - discount_pct / 100), 6)
+        r_sol = round(r_sol * (1 - discount_pct / 100), 4)
+
+    t1m = len(getStock("data/1m.txt") or [])
+    t3m = len(getStock("data/3m.txt") or [])
+    tokens_needed = amount // 2
+    stock_avail = t1m if dur_clean == "1m" else t3m
+    stock_status = f"✅ In Stock ({stock_avail * 2} boosts available)" if stock_avail >= tokens_needed else f"⚠️ Low Stock ({stock_avail * 2} available)"
+
+    embed = discord.Embed(
+        title=f"🧮 Multi-Crypto Price Calculator — {amount}x {dur_clean.upper()}",
+        description=(
+            f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+            f"◈ **Package**: `{amount}`x {dur_clean.upper()} Discord Server Boosts\n"
+            f"◈ **Tokens Required**: `{tokens_needed}` accounts\n"
+            f"◈ **Stock Status**: {stock_status}\n"
+            + (f"◈ **Discount Applied**: `{int(discount_pct)}% OFF` (`{discount}`)\n" if discount_pct else "")
+            + f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**Estimated Costs by Cryptocurrency**:\n"
+            f"• 🪙 **Litecoin (LTC)**: **`{r_ltc} LTC`** *(Lowest network fees)*\n"
+            f"• 💵 **Tether USDT**: **`${r_usdt} USDT`** *(Zero volatility)*\n"
+            f"• ₿ **Bitcoin (BTC)**: **`{r_btc} BTC`**\n"
+            f"• 🟣 **Solana (SOL)**: **`{r_sol} SOL`**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Type `/buy` to place your order!"
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="daily", description="Claim your daily streak reward for free discount codes and credits")
+async def slash_daily(interaction: discord.Interaction):
+    success, msg, streak, reward_type = await claim_daily_streak_db(interaction.user.id)
+    if not success:
+        return await interaction.response.send_message(msg, ephemeral=True)
+
+    if streak == 7:
+        discount_code = f"STREAK7-{interaction.user.id % 10000}"
+        create_discount(discount_code, 15.0)
+        add_user_balance(interaction.user.id, "1m", 2)
+        reward_desc = f"🎉 **7-DAY STREAK COMPLETED!**\n• **2x 1-Month Boost Credits** added to your balance!\n• **15% OFF Promo Code**: `{discount_code}`"
+    elif streak >= 5:
+        discount_code = f"STREAK5-{interaction.user.id % 10000}"
+        create_discount(discount_code, 10.0)
+        reward_desc = f"🔥 **Day {streak} Streak!**\n• **10% OFF Promo Code**: `{discount_code}`"
+    elif streak >= 3:
+        discount_code = f"STREAK3-{interaction.user.id % 10000}"
+        create_discount(discount_code, 5.0)
+        reward_desc = f"⚡ **Day {streak} Streak!**\n• **5% OFF Promo Code**: `{discount_code}`"
+    else:
+        discount_code = f"STREAK-{interaction.user.id % 10000}"
+        create_discount(discount_code, 3.0)
+        reward_desc = f"🌱 **Day {streak} Streak!**\n• **3% OFF Promo Code**: `{discount_code}`"
+
+    embed = discord.Embed(
+        title=f"🎁 Daily Streak Claimed — Day {streak}/7",
+        description=(
+            f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+            f"{reward_desc}\n\n"
+            f"Come back tomorrow to keep your streak alive and unlock higher rewards!"
+        ),
+        color=AIZEN_ACCENT
+    )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Daily Loyalty")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="faq", description="Open the interactive Buyer's FAQ and Guide")
+async def slash_faq(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 Sōsuke Aizen — Buyer's Knowledge Base & FAQ",
+        description=(
+            f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+            f"Select a topic from the dropdown menu below to learn how our automated boosting system works."
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed, view=FAQView())
+
+@bot.tree.command(name="setprefix", description="Change the bot's command prefix for this server (Admin only)")
+@app_commands.describe(prefix="New prefix (1-5 characters, e.g. ! or ?)")
+async def slash_setprefix(interaction: discord.Interaction, prefix: str):
+    if not interaction.user.guild_permissions.administrator and not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+    if len(prefix) > 5:
+        return await interaction.response.send_message("❌ Prefix must be between 1 and 5 characters.", ephemeral=True)
+
+    _guild_prefixes[interaction.guild.id] = prefix
+    await set_setting_db(f"guild_{interaction.guild.id}_prefix", prefix)
+    embed = discord.Embed(
+        title="⚙️ Server Prefix Updated",
+        description=f"✅ Prefix for **{interaction.guild.name}** updated to: `{prefix}`",
+        color=AIZEN_ACCENT
+    )
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="broadcast", description="Broadcast an announcement to all servers (Owner Only)")
+@app_commands.describe(message="Announcement text to send")
+async def slash_broadcast(interaction: discord.Interaction, message: str):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    embed = discord.Embed(
+        title="📢 Sōsuke Aizen — Official Announcement",
+        description=f"*\"No one stands on the heavens from the beginning.\"*\n\n{message}",
+        color=AIZEN_ACCENT
+    )
+    embed.set_footer(text="Official Broadcast • Kyōka Suigetsu Engine")
+    embed.timestamp = discord.utils.utcnow()
+
+    sent = 0
+    for guild in bot.guilds:
+        target_ch = None
+        shop_id = await get_setting_db(f"guild_{guild.id}_order_log_channel")
+        if shop_id:
+            try:
+                target_ch = guild.get_channel(int(shop_id))
+            except Exception:
+                pass
+        if not target_ch:
+            for ch in guild.text_channels:
+                if any(w in ch.name.lower() for w in ["announcements", "updates", "shop", "general"]):
+                    if ch.permissions_for(guild.me).send_messages:
+                        target_ch = ch
+                        break
+        if not target_ch:
+            for ch in guild.text_channels:
+                if ch.permissions_for(guild.me).send_messages:
+                    target_ch = ch
+                    break
+        if target_ch:
+            try:
+                await target_ch.send(embed=embed)
+                sent += 1
+            except Exception:
+                pass
+
+    await interaction.followup.send(f"📢 Broadcast sent to `{sent}` servers.", ephemeral=True)
+
 
 
 
