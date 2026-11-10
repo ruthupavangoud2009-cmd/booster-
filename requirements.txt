@@ -16,3 +16,5 @@ pystyle
 discord_webhook
 pytz
 PyYAML
+asyncpg
+psycopg2-binary

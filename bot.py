@@ -34,6 +34,15 @@ from payment import (
     DEFAULT_CRYPTO_RATES,
     USED_TOKENS_FILE
 )
+from database import (
+    init_database,
+    add_review_db,
+    get_reviews_stats_db,
+    get_recent_reviews_db,
+    get_setting_db,
+    set_setting_db,
+    is_db_connected
+)
 from tickets import (
     load_tickets_db,
     save_tickets_db,
@@ -129,7 +138,7 @@ NO_PREFIX_COMMANDS = {
     "ping", "help", "shop", "shoppanel", "panel", "buy", "stock", "boost",
     "balance", "bal", "credits", "wallet", "wallets", "redeem", "ticket", "tickets",
     "uptime", "stats", "botinfo", "serverinfo", "userinfo", "whoami", "avatar", "av", "pfp",
-    "clear", "purge"
+    "clear", "purge", "vouch", "review", "reviews", "vouches", "setreviewchannel"
 }
 
 def determine_prefix(bot_instance, message):
@@ -216,6 +225,15 @@ async def execute_boost(invite_str: str, amount: int, months: int, user_id: int,
     result_embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
 
     await status_msg.edit(embed=result_embed)
+
+    try:
+        prompt_view = InTicketBoostPromptView()
+        await channel.send(
+            f"<@{user_id}> 🎉 **Server boosted successfully!** Leave a quick vouch or apply more boosts below:",
+            view=prompt_view
+        )
+    except Exception:
+        pass
 
 # ==========================================
 # Payment View with Interactive Buttons
@@ -311,6 +329,99 @@ class PaymentView(View):
         t_data = db.get(str(interaction.channel.id), {"user_name": interaction.user.name, "user_id": interaction.user.id, "topic": "Order"})
         await interaction.response.send_modal(TicketCloseModal(t_data))
 
+class CustomerReviewModal(Modal, title="⭐ Submit Customer Review & Vouch"):
+    rating_input = TextInput(
+        label="Rating (1 to 5 Stars)",
+        placeholder="5",
+        default="5",
+        required=True,
+        max_length=1
+    )
+    product_input = TextInput(
+        label="Product / Service Purchased",
+        placeholder="e.g. 14x Discord Server Boosts (1 Month)",
+        default="Discord Server Boosts",
+        required=True,
+        max_length=100
+    )
+    comment_input = TextInput(
+        label="Your Review / Feedback",
+        style=discord.TextStyle.paragraph,
+        placeholder="Instant delivery! Boosted my server quickly, great service...",
+        required=True,
+        max_length=600
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            rating = int(self.rating_input.value.strip())
+            rating = max(1, min(5, rating))
+        except ValueError:
+            rating = 5
+
+        comment = self.comment_input.value.strip()
+        product = self.product_input.value.strip() or "Discord Server Boosts"
+
+        rev = await add_review_db(
+            user_id=interaction.user.id,
+            user_name=interaction.user.name,
+            rating=rating,
+            comment=comment,
+            product=product
+        )
+        stats = await get_reviews_stats_db()
+
+        # Build Review / Vouch Card
+        stars = "⭐" * rating
+        vouch_embed = discord.Embed(
+            title="⭐ Verified Customer Review & Vouch",
+            description=(
+                f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+                f"◈ **Rating**: {stars} (`{rating}/5`)\n"
+                f"◈ **Customer**: {interaction.user.mention} (`{interaction.user.name}`)\n"
+                f"◈ **Product**: `{product}`\n"
+                f"◈ **Order Status**: `✅ Verified Customer`\n\n"
+                f"**Feedback**:\n```{comment}```"
+            ),
+            color=AIZEN_ACCENT
+        )
+        vouch_embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        vouch_embed.set_footer(
+            text=f"Aizen Reviews • Total Vouches: {stats['total_reviews']} • Avg: {stats['average_rating']}★"
+        )
+        vouch_embed.timestamp = discord.utils.utcnow()
+
+        # Find review channel
+        channel_id_setting = await get_setting_db(f"guild_{interaction.guild.id}_review_channel") if interaction.guild else None
+        if not channel_id_setting:
+            channel_id_setting = await get_setting_db("review_channel_id")
+
+        review_channel = None
+        if channel_id_setting and interaction.guild:
+            try:
+                review_channel = interaction.guild.get_channel(int(channel_id_setting))
+            except Exception:
+                review_channel = None
+
+        if not review_channel and interaction.guild:
+            for ch in interaction.guild.text_channels:
+                if any(w in ch.name.lower() for w in ["vouch", "review", "feedback", "vouches", "reviews"]):
+                    review_channel = ch
+                    break
+
+        posted_msg = ""
+        if review_channel:
+            try:
+                await review_channel.send(embed=vouch_embed)
+                posted_msg = f" and published in {review_channel.mention}!"
+            except Exception:
+                pass
+
+        await interaction.response.send_message(
+            f"✨ **Thank you for your feedback, {interaction.user.mention}!** Your review has been saved{posted_msg}",
+            ephemeral=True
+        )
+
 class InTicketBoostPromptView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -318,6 +429,10 @@ class InTicketBoostPromptView(View):
     @discord.ui.button(label="🚀 Apply Boosts to Server", style=discord.ButtonStyle.success, custom_id="btn_apply_boost_prompt")
     async def btn_apply(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(InTicketApplyBoostModal())
+
+    @discord.ui.button(label="⭐ Leave Review / Vouch", style=discord.ButtonStyle.primary, custom_id="btn_leave_review_prompt")
+    async def btn_review(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(CustomerReviewModal())
 
     @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="btn_close_prompt")
     async def btn_close(self, interaction: discord.Interaction, button: Button):
@@ -763,6 +878,39 @@ class ShopPanelView(View):
             ephemeral=True
         )
 
+    @discord.ui.button(label="⭐ Reviews & Vouches", style=discord.ButtonStyle.secondary, custom_id="shop_btn_reviews", row=0)
+    async def btn_reviews(self, interaction: discord.Interaction, button: Button):
+        stats = await get_reviews_stats_db()
+        recent = await get_recent_reviews_db(limit=3)
+
+        desc = (
+            f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+            f"◈ **Average Rating**: `⭐ {stats['average_rating']} / 5.0`\n"
+            f"◈ **Total Verified Vouches**: `{stats['total_reviews']}`\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**Recent Customer Reviews**:\n"
+        )
+        if recent:
+            for r in recent:
+                stars = "⭐" * r.get("rating", 5)
+                desc += f"• **{r.get('user_name', 'Customer')}** ({stars}):\n  *{r.get('comment', 'Great service!')}*\n\n"
+        else:
+            desc += "*No reviews yet. Be the first to leave a review! Use `$vouch`.*\n"
+
+        embed = discord.Embed(
+            title="⭐ Customer Satisfaction & Verified Reviews",
+            description=desc,
+            color=AIZEN_COLOR
+        )
+        embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine | 100% Verified Delivery")
+        view = View(timeout=120)
+        v_btn = Button(label="✍️ Write a Review / Vouch", style=discord.ButtonStyle.success)
+        async def _open_rev(inter: discord.Interaction):
+            await inter.response.send_modal(CustomerReviewModal())
+        v_btn.callback = _open_rev
+        view.add_item(v_btn)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
     @discord.ui.button(label="💳 My Balance", style=discord.ButtonStyle.secondary, custom_id="shop_btn_bal", row=1)
     async def btn_bal(self, interaction: discord.Interaction, button: Button):
         bal = get_user_balance(interaction.user.id)
@@ -812,6 +960,12 @@ async def on_ready():
     print(f" [+] SOL Address: {sol_address or 'NOT SET'}")
     print("=" * 60)
 
+    # Initialize Supabase PostgreSQL Database & sync records
+    try:
+        await init_database()
+    except Exception as e:
+        print(f" [~] Database init exception: {e}")
+
     # Register persistent views so buttons work across restarts
     bot.add_view(ShopPanelView())
 
@@ -830,6 +984,7 @@ async def cmd_shoppanel(ctx: commands.Context):
     """Deploys the all-in-one Aizen Shop Panel in this channel."""
     t1m = len(getStock("data/1m.txt") or [])
     t3m = len(getStock("data/3m.txt") or [])
+    stats = await get_reviews_stats_db()
 
     embed = discord.Embed(
         title="⚔️ ── SŌSUKE AIZEN | THE THRONE ── ⚔️",
@@ -843,6 +998,7 @@ async def cmd_shoppanel(ctx: commands.Context):
             f"◈ **3-Month Boosts**: Long-term boost packages\n\n"
             f"**🪙 Supported Crypto**: `LTC` • `USDT` • `BTC` • `SOL`\n"
             f"**📦 Live Stock**: `{t1m * 2}` 1m Boosts | `{t3m * 2}` 3m Boosts\n"
+            f"**⭐ Customer Rating**: `⭐ {stats['average_rating']} / 5.0` (`{stats['total_reviews']}` Verified Vouches)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Click a button below to begin your purchase or open a consultation ticket."
         ),
@@ -884,6 +1040,128 @@ async def cmd_ticketpanel(ctx: commands.Context):
     embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
     view = TicketTopicLaunchView(bot, HARDCODED_OWNERS)
     await ctx.send(embed=embed, view=view)
+
+# ==========================================
+# Customer Reviews & Vouches Management
+# ==========================================
+
+@bot.command(name="setreviewchannel", aliases=["setvouchchannel", "reviewchannel", "vouchchannel"])
+@commands.has_permissions(administrator=True)
+async def cmd_setreviewchannel(ctx: commands.Context, channel: discord.TextChannel = None):
+    """Set the dedicated channel where verified customer reviews and vouches are auto-posted."""
+    target = channel or ctx.channel
+    await set_setting_db(f"guild_{ctx.guild.id}_review_channel", str(target.id))
+    await set_setting_db("review_channel_id", str(target.id))
+
+    embed = discord.Embed(
+        title="⭐ Review & Vouch Channel Configured",
+        description=(
+            f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+            f"✅ Verified customer reviews and vouches will now automatically post to {target.mention}."
+        ),
+        color=AIZEN_ACCENT
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="vouch", aliases=["review"])
+@commands.cooldown(1, 10, commands.BucketType.user)
+async def cmd_vouch(ctx: commands.Context, rating: Optional[int] = None, *, comment: Optional[str] = None):
+    """Leave a verified review/vouch for Aizen Boosting Services."""
+    if rating is None or not comment:
+        view = View(timeout=120)
+        btn = Button(label="⭐ Open Review Form", style=discord.ButtonStyle.primary)
+        async def _open(inter: discord.Interaction):
+            if inter.user.id != ctx.author.id:
+                return await inter.response.send_message("❌ This is not your prompt.", ephemeral=True)
+            await inter.response.send_modal(CustomerReviewModal())
+        btn.callback = _open
+        view.add_item(btn)
+        return await ctx.send("⭐ **Click below to write your verified review & vouch:**", view=view)
+
+    rating = max(1, min(5, int(rating)))
+    product = "Discord Server Boosts"
+    rev = await add_review_db(
+        user_id=ctx.author.id,
+        user_name=ctx.author.name,
+        rating=rating,
+        comment=comment,
+        product=product
+    )
+    stats = await get_reviews_stats_db()
+
+    stars = "⭐" * rating
+    vouch_embed = discord.Embed(
+        title="⭐ Customer Review & Vouch Verified",
+        description=(
+            f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+            f"◈ **Rating**: {stars} (`{rating}/5`)\n"
+            f"◈ **Customer**: {ctx.author.mention} (`{ctx.author.name}`)\n"
+            f"◈ **Product**: `{product}`\n\n"
+            f"**Feedback**:\n```{comment}```"
+        ),
+        color=AIZEN_ACCENT
+    )
+    vouch_embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    vouch_embed.set_footer(
+        text=f"Aizen Reviews • Total Vouches: {stats['total_reviews']} • Avg Rating: {stats['average_rating']}★"
+    )
+    vouch_embed.timestamp = discord.utils.utcnow()
+
+    # Find review channel
+    channel_id_setting = await get_setting_db(f"guild_{ctx.guild.id}_review_channel") if ctx.guild else None
+    if not channel_id_setting:
+        channel_id_setting = await get_setting_db("review_channel_id")
+
+    review_channel = None
+    if channel_id_setting and ctx.guild:
+        try:
+            review_channel = ctx.guild.get_channel(int(channel_id_setting))
+        except Exception:
+            review_channel = None
+
+    if not review_channel and ctx.guild:
+        for ch in ctx.guild.text_channels:
+            if any(w in ch.name.lower() for w in ["vouch", "review", "feedback", "vouches", "reviews"]):
+                review_channel = ch
+                break
+
+    if review_channel:
+        try:
+            await review_channel.send(embed=vouch_embed)
+        except Exception:
+            pass
+
+    await ctx.send(f"✅ **Thank you for your vouch, {ctx.author.mention}!** Your feedback has been stored in the database.")
+
+@bot.command(name="reviews", aliases=["vouches"])
+@commands.cooldown(1, 5, commands.BucketType.user)
+async def cmd_reviews(ctx: commands.Context):
+    """View overall satisfaction stats and recent verified customer vouches."""
+    stats = await get_reviews_stats_db()
+    recent = await get_recent_reviews_db(limit=5)
+
+    desc = (
+        f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+        f"◈ **Overall Satisfaction**: `⭐ {stats['average_rating']} / 5.0`\n"
+        f"◈ **Total Verified Vouches**: `{stats['total_reviews']}`\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"**Latest Customer Reviews**:\n"
+    )
+    if recent:
+        for r in recent:
+            stars = "⭐" * r.get("rating", 5)
+            desc += f"• **{r.get('user_name', 'Customer')}** ({stars}):\n  *{r.get('comment', 'Great service!')}*\n\n"
+    else:
+        desc += "*No reviews yet. Be the first to leave a review using `$vouch`!*\n"
+
+    embed = discord.Embed(
+        title="⭐ Sōsuke Aizen Customer Reviews & Vouches",
+        description=desc,
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine | 100% Automated")
+    await ctx.send(embed=embed)
 
 # ==========================================
 # Boosting Commands
@@ -1395,7 +1673,8 @@ async def cmd_ping(ctx: commands.Context):
     embed.add_field(name="⚡ Gateway Latency", value=f"`{ws_latency}ms`", inline=True)
     embed.add_field(name="🌐 API Roundtrip", value=f"`{api_latency}ms`", inline=True)
     embed.add_field(name="⏱️ System Uptime", value=f"`{get_uptime_str()}`", inline=True)
-    embed.add_field(name="☁️ Hosting Platform", value="`Render Cloud Web Service`", inline=True)
+    embed.add_field(name="☁️ System Status", value="`Operational (24/7 Active)`", inline=True)
+    embed.add_field(name="🗄️ Database Engine", value="`Supabase PostgreSQL`" if is_db_connected() else "`Resilient Storage`", inline=True)
     embed.add_field(name="🛡️ Security Level", value="`Hardened & Active`", inline=True)
     embed.add_field(name="✨ Prefix Mode", value=f"`{prefix}` or `no-prefix for shortcuts`", inline=True)
     embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
@@ -1410,7 +1689,7 @@ async def cmd_uptime(ctx: commands.Context):
         description=(
             f"*\"Since when were you under the impression...\"*\n\n"
             f"◈ **Online Duration**: `{get_uptime_str()}`\n"
-            f"◈ **24/7 Keep-Alive**: `Running on Render Cloud (/healthz)`\n"
+            f"◈ **24/7 High-Availability**: `Active & Operational`\n"
             f"◈ **Connected Servers**: `{len(bot.guilds)}`"
         ),
         color=AIZEN_COLOR
@@ -1476,7 +1755,8 @@ async def cmd_botinfo(ctx: commands.Context):
             f"◈ **Web Latency**: `{round(bot.latency * 1000)}ms`\n"
             f"◈ **Active Servers**: `{len(bot.guilds)}`\n"
             f"◈ **Available Stock**: `{t1m * 2}` 1m Boosts | `{t3m * 2}` 3m Boosts\n"
-            f"◈ **Render Keep-Alive**: `Active (24/7 Web Service)`\n"
+            f"◈ **System Status**: `Operational (24/7 Active)`\n"
+            f"◈ **Database**: `{'Supabase PostgreSQL' if is_db_connected() else 'Resilient Storage'}`\n"
             f"◈ **Owners**: `{', '.join(str(o) for o in HARDCODED_OWNERS)}`"
         ),
         color=AIZEN_COLOR
@@ -1577,6 +1857,9 @@ def get_modular_help_embed(category: str, p: str) -> discord.Embed:
         embed.add_field(name=f"💳 `{p}balance`", value="Displays your current available 1-Month and 3-Month boost credits.", inline=False)
         embed.add_field(name=f"📦 `{p}stock`", value="View the bot's real-time Nitro token stock and total boosts available.", inline=False)
         embed.add_field(name=f"📊 `{p}stats`", value="View total shop sales, revenue earned, and completed orders.", inline=False)
+        embed.add_field(name=f"⭐ `{p}vouch [1-5] [comment]` *(or `{p}review`)*", value="Leave a verified review/vouch for boost orders.", inline=False)
+        embed.add_field(name=f"📜 `{p}reviews` *(or `{p}vouches`)*", value="View customer reviews and average satisfaction rating.", inline=False)
+        embed.add_field(name=f"⚙️ `{p}setreviewchannel #channel` 👑", value="Configure channel for automatic customer review publishing.", inline=False)
         embed.set_footer(text="Use the dropdown menu below to navigate modules")
         return embed
 
@@ -1658,7 +1941,7 @@ def get_modular_help_embed(category: str, p: str) -> discord.Embed:
             color=AIZEN_COLOR
         )
         embed.add_field(name=f"🏓 `{p}ping` *(or just `ping`)*", value="View WebSocket latency, REST API roundtrip, and system uptime.", inline=False)
-        embed.add_field(name=f"⏱️ `{p}uptime` *(or just `uptime`)*", value="Check continuous 24/7 online duration on Render.", inline=False)
+        embed.add_field(name=f"⏱️ `{p}uptime` *(or just `uptime`)*", value="Check continuous 24/7 online duration.", inline=False)
         embed.add_field(name=f"🏰 `{p}serverinfo` *(or just `serverinfo`)*", value="Display server statistics, member counts, and Discord boost tier.", inline=False)
         embed.add_field(name=f"👤 `{p}userinfo` *(or just `userinfo`, `whoami`)*", value="Inspect user account creation date, server join date, and boost balance.", inline=False)
         embed.add_field(name=f"🤖 `{p}botinfo` *(or just `botinfo`)*", value="View bot engine statistics, version, active servers, and host details.", inline=False)
