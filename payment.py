@@ -3,6 +3,7 @@ import json
 import time
 import random
 import string
+import threading
 import requests
 from datetime import datetime
 from typing import Dict, Any, Tuple, Optional, List
@@ -13,19 +14,27 @@ USED_TOKENS_FILE = "data/used_tokens.txt"
 KEYS_FILE = "data/keys/keys.json"
 DISCOUNTS_FILE = "data/discounts.json"
 
+_file_lock = threading.Lock()
+
 def load_json(filepath: str, default: Any) -> Any:
     if not os.path.exists(filepath):
         return default
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
+    with _file_lock:
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
 
 def save_json(filepath: str, data: Any):
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    """Saves JSON atomically to prevent corruption from concurrent requests."""
+    with _file_lock:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        temp_path = f"{filepath}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_path, filepath)
+
 
 # ==========================================
 # Balance Management
@@ -264,9 +273,28 @@ def create_invoice(
     save_json(INVOICES_FILE, invoices)
     return invoice
 
-def get_invoice(invoice_id: str) -> Optional[Dict[str, Any]]:
+def get_ltc_qr_url(address: str, amount: float) -> str:
+    """Generates standard BIP21 Litecoin QR code image URL."""
+    uri = f"litecoin:{address}?amount={amount}"
+    return f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={uri}"
+
+def cancel_invoice(invoice_id: str, user_id: int, is_owner_user: bool = False) -> Tuple[bool, str]:
+    """Allows cancelling a pending invoice."""
     invoices = load_json(INVOICES_FILE, {})
-    return invoices.get(invoice_id)
+    inv = invoices.get(invoice_id)
+    if not inv:
+        return False, "Invoice not found."
+    if inv.get("status") != "pending":
+        return False, f"Invoice is already {inv.get('status')}."
+    if inv.get("user_id") != user_id and not is_owner_user:
+        return False, "You can only cancel your own pending invoices."
+
+    inv["status"] = "cancelled"
+    inv["cancelled_at"] = time.time()
+    invoices[invoice_id] = inv
+    save_json(INVOICES_FILE, invoices)
+    return True, f"Invoice `{invoice_id}` has been cancelled successfully."
+
 
 def check_invoice_payment(invoice_id: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     invoices = load_json(INVOICES_FILE, {})

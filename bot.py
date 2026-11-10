@@ -19,6 +19,8 @@ from payment import (
     check_invoice_payment,
     force_complete_invoice,
     get_invoice,
+    cancel_invoice,
+    get_ltc_qr_url,
     generate_boost_key,
     redeem_boost_key,
     get_wallet_live_info,
@@ -191,6 +193,24 @@ class PaymentView(View):
     async def copy_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(f"```{self.ltc_addy}```", ephemeral=True)
 
+    @discord.ui.button(label="❌ Cancel Order", style=discord.ButtonStyle.danger, custom_id="btn_cancel_order")
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        inv = get_invoice(self.invoice_id)
+        if not inv or inv.get("status") != "pending":
+            return await interaction.response.send_message("❌ Order cannot be cancelled.", ephemeral=True)
+        if interaction.user.id != inv.get("user_id") and not is_owner(interaction.user):
+            return await interaction.response.send_message("❌ Only the buyer or bot owner can cancel this order.", ephemeral=True)
+
+        cancel_invoice(self.invoice_id, interaction.user.id, is_owner(interaction.user))
+        self.stop()
+        embed = interaction.message.embeds[0]
+        embed.title = "❌ Payment Order Cancelled"
+        embed.color = 0xED4245
+        embed.set_field_at(3, name="Status", value="`CANCELLED`", inline=False)
+        await interaction.message.edit(embed=embed, view=None)
+        await interaction.response.send_message("✅ Order has been cancelled.", ephemeral=True)
+
+
 class BoostLaunchView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -261,6 +281,7 @@ async def slash_boost(interaction: discord.Interaction):
     await interaction.response.send_modal(BoostModal())
 
 @bot.command(name="boost")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def cmd_boost(ctx: commands.Context, invite: str = None, amount: int = None, months: int = None):
     """
     Apply boosts to a server.
@@ -316,6 +337,7 @@ async def cmd_boost(ctx: commands.Context, invite: str = None, amount: int = Non
 # ==========================================
 
 @bot.command(name="buy")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def cmd_buy(ctx: commands.Context, duration: str = None, amount: int = None, *args):
     """
     Auto-buy boost credits with instant delivery.
@@ -390,7 +412,8 @@ async def cmd_buy(ctx: commands.Context, duration: str = None, amount: int = Non
         embed.add_field(name="⚡ Auto-Delivery Target", value=f"`.gg/{getinviteCode(target_invite)}` (Will boost instantly once paid)", inline=False)
 
     embed.add_field(name="⏳ Status", value="`Awaiting Payment (Expires in 60 mins)`", inline=False)
-    embed.set_footer(text="Click 'Check Payment' once sent to check blockchain immediately")
+    embed.set_thumbnail(url=get_ltc_qr_url(target_address, total_ltc))
+    embed.set_footer(text="Scan QR with your LTC wallet or click 'Copy Address'")
 
     view = PaymentView(invoice['id'], target_address, total_ltc)
     msg = await ctx.send(embed=embed, view=view)
@@ -402,6 +425,7 @@ async def cmd_buy(ctx: commands.Context, duration: str = None, amount: int = Non
 # ==========================================
 
 @bot.command(name="redeem")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def cmd_redeem(ctx: commands.Context, key_code: str = None):
     """
     Redeem an instant delivery boost key code.
@@ -566,6 +590,7 @@ async def cmd_stats(ctx: commands.Context):
 # ==========================================
 
 @bot.command(name="balance", aliases=["credits", "bal"])
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def cmd_balance(ctx: commands.Context, member: discord.Member = None):
     """Check boost credit balance."""
     target = member or ctx.author
@@ -743,6 +768,75 @@ async def cmd_confirmorder(ctx: commands.Context, invoice_id: str):
     await ctx.send(embed=embed)
 
 # ==========================================
+# Cancel Order & Ping Commands
+# ==========================================
+
+@bot.command(name="cancelorder")
+async def cmd_cancelorder(ctx: commands.Context, invoice_id: str = None):
+    """Cancel a pending invoice."""
+    if not invoice_id:
+        return await ctx.send(f"❌ Usage: `{prefix}cancelorder <INV-ID>`")
+    success, msg = cancel_invoice(invoice_id.strip(), ctx.author.id, is_owner(ctx.author))
+    color = 0x57F287 if success else 0xFF0000
+    await ctx.send(embed=discord.Embed(title="Order Cancellation", description=msg, color=color))
+
+@bot.command(name="ping")
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_ping(ctx: commands.Context):
+    """Check bot responsiveness and gateway latency."""
+    start_time = time.time()
+    msg = await ctx.send("🏓 Pinging...")
+    end_time = time.time()
+
+    api_latency = round((end_time - start_time) * 1000)
+    ws_latency = round(bot.latency * 1000)
+
+    embed = discord.Embed(title="🏓 Pong!", color=0x57F287)
+    embed.add_field(name="Gateway Latency", value=f"`{ws_latency}ms`", inline=True)
+    embed.add_field(name="API Latency", value=f"`{api_latency}ms`", inline=True)
+    embed.add_field(name="Security Status", value="`Hardened & Active`", inline=True)
+    await msg.edit(content=None, embed=embed)
+
+# ==========================================
+# Global Security & Rate-Limit Error Handler
+# ==========================================
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: Exception):
+    """Centralized security error handler preventing spam and server crashes."""
+    if isinstance(error, commands.CommandOnCooldown):
+        return await ctx.send(
+            embed=discord.Embed(
+                title="⏳ Rate Limited",
+                description=f"You are on cooldown. Please wait **`{error.retry_after:.1f}s`** before using this command again.",
+                color=0xFEE75C
+            ),
+            delete_after=5
+        )
+    elif isinstance(error, commands.MissingRequiredArgument):
+        return await ctx.send(
+            embed=discord.Embed(
+                title="⚠️ Missing Arguments",
+                description=f"Missing required parameter: `{error.param.name}`.\nType `{prefix}help` to view correct syntax.",
+                color=0xFF0000
+            ),
+            delete_after=10
+        )
+    elif isinstance(error, commands.BadArgument):
+        return await ctx.send(
+            embed=discord.Embed(
+                title="⚠️ Invalid Parameter",
+                description="Please check your input values (e.g. amounts must be valid numbers).",
+                color=0xFF0000
+            ),
+            delete_after=10
+        )
+    elif isinstance(error, commands.CommandNotFound):
+        return
+    else:
+        print(f"[!] Error in command '{ctx.command}': {error}")
+
+# ==========================================
 # Modular Help System
 # ==========================================
 
@@ -758,7 +852,7 @@ def get_modular_help_embed(category: str, p: str) -> discord.Embed:
         embed.add_field(
             name=f"⚡ `{p}buy <1m|3m> <amount> [invite] [code:PROMO]`",
             value=(
-                "Creates an automated Litecoin invoice with an interactive `[Check Payment]` button.\n"
+                "Creates an automated Litecoin invoice with QR code and an interactive `[Check Payment]` button.\n"
                 "• **Instant Auto-Boost**: Add your invite link (`$buy 1m 2 discord.gg/example`) to boost immediately upon payment!\n"
                 "• **Promo Codes**: Add a discount (`$buy 1m 2 code:SAVE10`) to get a price reduction."
             ),
@@ -782,6 +876,11 @@ def get_modular_help_embed(category: str, p: str) -> discord.Embed:
         embed.add_field(
             name=f"📊 `{p}stats`",
             value="View total shop sales, revenue earned in LTC, and completed orders.",
+            inline=False
+        )
+        embed.add_field(
+            name=f"❌ `{p}cancelorder <INV-ID>`",
+            value="Cancel a pending unpaid order.",
             inline=False
         )
         embed.set_footer(text="Use the dropdown menu below to navigate modules")
@@ -893,75 +992,86 @@ def get_modular_help_embed(category: str, p: str) -> discord.Embed:
         embed.set_footer(text="Restricted to hardcoded bot owners [1505515188991033409, 1521774957065928734]")
         return embed
 
-    else:
-        # Default All-in-One Modular View
+    elif category == "all":
+        # Full Cheatsheet
         embed = discord.Embed(
-            title="⚡ Booster & Auto-Shop Bot — Command Menu",
-            description=(
-                f"Welcome to the Booster Bot. All commands are organized below into modular categories.\n"
-                f"Use the **interactive dropdown menu** below to view detailed syntax and examples for any module."
-            ),
+            title="📜 Full Commands Cheatsheet",
+            description="Complete list of all available bot commands across every module.",
             color=0x5865F2
         )
-
         embed.add_field(
-            name="🛒 Auto-Shop & Purchasing",
+            name="🛒 Auto-Shop",
             value=(
-                f"• `{p}buy <1m|3m> <amount> [invite]` — Auto-buy with LTC (instant boost or code)\n"
+                f"• `{p}buy <1m|3m> <amount> [invite]` — Auto-buy with LTC\n"
                 f"• `{p}redeem <code>` — Redeem a boost key code\n"
-                f"• `{p}balance` *(or `{p}credits`)* — Check your available boost credits\n"
-                f"• `{p}stock` — View available Nitro token stock\n"
-                f"• `{p}stats` — View total shop sales & revenue"
+                f"• `{p}balance` — Check boost credits\n"
+                f"• `{p}stock` — View token stock\n"
+                f"• `{p}stats` — View total sales & revenue\n"
+                f"• `{p}cancelorder <INV-ID>` — Cancel pending order"
             ),
             inline=False
         )
-
         embed.add_field(
-            name="🚀 Server Boosting",
+            name="🚀 Boosting",
             value=(
-                f"• `{p}boost <invite> <amount> <months>` — Boost a server with credits\n"
-                f"• `{p}boost` — Open the interactive booster panel button\n"
-                f"• `/boost` — Slash command version of the boost popup"
+                f"• `{p}boost <invite> <amount> <months>` — Boost a server\n"
+                f"• `{p}boost` — Interactive button\n"
+                f"• `/boost` — Slash command modal"
             ),
             inline=False
         )
-
         embed.add_field(
             name="🪙 Litecoin & Wallet",
             value=(
-                f"• `{p}wallet` — Live blockchain inspect of linked LTC wallet\n"
-                f"• `{p}setwallet <address>` — 👑 Link a new LTC receiving address\n"
-                f"• `{p}setprice <1m|3m> <ltc>` — 👑 Change boost prices on the fly"
+                f"• `{p}wallet` — Live blockchain inspect\n"
+                f"• `{p}setwallet <address>` — 👑 Link new LTC wallet\n"
+                f"• `{p}setprice <1m|3m> <ltc>` — 👑 Change boost prices"
             ),
             inline=False
         )
-
         embed.add_field(
-            name="👑 Owner & Administration",
+            name="👑 Owner Admin",
             value=(
-                f"• `{p}restock <1m|3m>` — Bulk restock tokens (paste or attach `.txt`)\n"
-                f"• `{p}createcode <1m|3m> <amt>` — Generate free redeemable gift keys\n"
-                f"• `{p}creatediscount <code> <%>` — Create promotional discount codes\n"
-                f"• `{p}addcredits @user <1m|3m> <amt>` — Gift credits manually\n"
-                f"• `{p}removecredits @user <1m|3m> <amt>` — Deduct credits manually\n"
-                f"• `{p}confirmorder <INV-ID>` — Force-approve a pending invoice\n"
-                f"• `{p}usedtokens` — Check count of archived used accounts"
+                f"• `{p}restock <1m|3m>` — Bulk restock tokens\n"
+                f"• `{p}createcode <1m|3m> <amt>` — Create gift code\n"
+                f"• `{p}creatediscount <code> <%>` — Create discount\n"
+                f"• `{p}addcredits @user <1m|3m> <amt>` — Gift credits\n"
+                f"• `{p}removecredits @user <1m|3m> <amt>` — Remove credits\n"
+                f"• `{p}confirmorder <INV-ID>` — Force-approve invoice\n"
+                f"• `{p}usedtokens` — Check archived used tokens"
             ),
             inline=False
         )
+        embed.set_footer(text=f"Prefix: {p} | Select an individual category for detailed examples")
+        return embed
 
-        embed.set_footer(text=f"Prefix: {p} | Select a category below for full guide & examples")
+    else:
+        # Minimalist Sleek Home Screen (Small & Clean)
+        embed = discord.Embed(
+            title="⚡ Booster & Auto-Shop Bot",
+            description=(
+                f"> **Prefix**: `{p}`  •  **Status**: `Online 24/7`  •  **Security**: `Active`\n\n"
+                f"Select a category from the dropdown menu below to view commands:\n\n"
+                f"• 🛒 **Auto-Shop**: Buy boosts with LTC, redeem keys & credits\n"
+                f"• 🚀 **Server Boosting**: Direct boosting & interactive panel\n"
+                f"• 🪙 **Litecoin & Wallet**: Live wallet check & pricing\n"
+                f"• 👑 **Owner Admin**: Restock, gift codes, discounts & users"
+            ),
+            color=0x5865F2
+        )
+        embed.set_footer(text="🔒 Protected by Anti-Spam Rate Limiter & Owner Lockdown")
         return embed
 
 class HelpDropdown(Select):
     def __init__(self, p: str):
         self.p = p
         options = [
-            discord.SelectOption(label="All Commands Overview", value="all", emoji="🌐", description="View all modules and commands at once"),
+            discord.SelectOption(label="Home Overview", value="home", emoji="🏠", description="Return to the minimal home overview"),
             discord.SelectOption(label="Auto-Shop & Purchasing", value="shop", emoji="🛒", description="Commands for buying, redeeming & credits"),
             discord.SelectOption(label="Server Boosting", value="boost", emoji="🚀", description="Commands for boosting Discord servers"),
             discord.SelectOption(label="Litecoin & Wallet", value="wallet", emoji="🪙", description="LTC wallet inspection & pricing"),
-            discord.SelectOption(label="Owner Administration", value="admin", emoji="👑", description="Bulk restock, gift codes, discounts & users")
+            discord.SelectOption(label="Owner Administration", value="admin", emoji="👑", description="Bulk restock, gift codes, discounts & users"),
+            discord.SelectOption(label="Full Cheatsheet", value="all", emoji="📜", description="View all commands at a glance")
         ]
         super().__init__(placeholder="📂 Select a module to explore...", min_values=1, max_values=1, options=options)
 
@@ -976,11 +1086,13 @@ class ModularHelpView(View):
         self.add_item(HelpDropdown(p))
 
 @bot.command(name="help")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def cmd_help(ctx: commands.Context):
-    """Show super clean modular help menu with interactive dropdown."""
-    embed = get_modular_help_embed("all", prefix)
+    """Show clean minimalist home screen with interactive dropdown."""
+    embed = get_modular_help_embed("home", prefix)
     view = ModularHelpView(prefix)
     await ctx.send(embed=embed, view=view)
+
 
 
 # ==========================================
