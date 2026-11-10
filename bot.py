@@ -35,8 +35,14 @@ from payment import (
     USED_TOKENS_FILE
 )
 from tickets import (
+    load_tickets_db,
+    save_tickets_db,
+    get_user_open_ticket,
+    create_or_get_ticket,
     TicketTopicLaunchView,
+    TicketTopicSelect,
     TicketInsideControls,
+    TicketCloseModal,
     AIZEN_COLOR,
     AIZEN_ACCENT
 )
@@ -196,26 +202,41 @@ class PaymentView(View):
         paid, msg, inv = check_invoice_payment(self.invoice_id)
         if paid:
             self.stop()
-            embed = interaction.message.embeds[0]
-            embed.title = "⚔️ Payment Confirmed & Delivered!"
-            embed.color = AIZEN_ACCENT
-            embed.set_field_at(3, name="Status", value="`PAID & DELIVERED`", inline=False)
-            await interaction.message.edit(embed=embed, view=None)
+            if interaction.message and interaction.message.embeds:
+                embed = interaction.message.embeds[0]
+                embed.title = "⚔️ Payment Confirmed & Delivered!"
+                embed.color = AIZEN_ACCENT
+                embed.set_field_at(3, name="Status", value="`PAID & DELIVERED`", inline=False)
+                await interaction.message.edit(embed=embed, view=None)
 
             code = inv.get("redeem_key", "Generated")
-            dm_msg = f"⚔️ **Payment Verified!**\nYour redeemable code: `{code}`\nAdded `{inv['boosts']}`x `{inv['duration']}` boost credits to your balance!"
+            c_name = inv.get("crypto", "LTC").upper()
+            total_amt = inv.get("amount", inv.get("ltc_amount"))
+            user_id = inv["user_id"]
 
-            try:
-                await interaction.user.send(dm_msg)
-            except Exception:
-                pass
-
-            await interaction.followup.send(f"🎉 **Payment Verified!**\nYour instant code: `{code}`\nUse `{prefix}boost <invite> {inv['boosts']} {inv['duration'].replace('m', '')}` to apply your boosts!", ephemeral=True)
+            celebrate_embed = discord.Embed(
+                title="🎉 Payment Confirmed & Delivered!",
+                description=(
+                    f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+                    f"◈ **Received**: `{total_amt} {c_name}`\n"
+                    f"◈ **Credits Added**: `{inv['boosts']}x {inv['duration']}`\n"
+                    f"◈ **Receipt Key**: `{code}`\n\n"
+                    f"*(Credits are deposited to your account. Use button below to boost your server!)*"
+                ),
+                color=AIZEN_ACCENT
+            )
+            celebrate_embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
 
             if inv.get("target_invite"):
                 months_num = int(inv["duration"].replace("m", ""))
-                deduct_user_balance(inv["user_id"], inv["duration"], inv["boosts"])
-                await execute_boost(inv["target_invite"], inv["boosts"], months_num, inv["user_id"], interaction.channel)
+                deduct_user_balance(user_id, inv["duration"], inv["boosts"])
+                await interaction.channel.send(content=f"<@{user_id}>", embed=celebrate_embed)
+                await execute_boost(inv["target_invite"], inv["boosts"], months_num, user_id, interaction.channel)
+            else:
+                boost_view = InTicketBoostPromptView()
+                await interaction.channel.send(content=f"<@{user_id}>", embed=celebrate_embed, view=boost_view)
+
+            await interaction.followup.send(f"🎉 **Payment Verified!** Added `{inv['boosts']}`x `{inv['duration']}` credits.", ephemeral=True)
         else:
             await interaction.followup.send(f"⏳ {msg}\n*Please allow network confirmations to register on the blockchain.*", ephemeral=True)
 
@@ -233,20 +254,82 @@ class PaymentView(View):
 
         cancel_invoice(self.invoice_id, interaction.user.id, is_owner(interaction.user))
         self.stop()
-        embed = interaction.message.embeds[0]
-        embed.title = "❌ Payment Order Cancelled"
-        embed.color = discord.Color.red()
-        embed.set_field_at(3, name="Status", value="`CANCELLED`", inline=False)
-        await interaction.message.edit(embed=embed, view=None)
+        if interaction.message and interaction.message.embeds:
+            embed = interaction.message.embeds[0]
+            embed.title = "❌ Payment Order Cancelled"
+            embed.color = discord.Color.red()
+            embed.set_field_at(3, name="Status", value="`CANCELLED`", inline=False)
+            await interaction.message.edit(embed=embed, view=None)
         await interaction.response.send_message("✅ Order has been cancelled.", ephemeral=True)
 
-class BoostLaunchView(View):
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.secondary, custom_id="btn_invoice_close")
+    async def close_button(self, interaction: discord.Interaction, button: Button):
+        db = load_tickets_db()
+        t_data = db.get(str(interaction.channel.id), {"user_name": interaction.user.name, "user_id": interaction.user.id, "topic": "Order"})
+        await interaction.response.send_modal(TicketCloseModal(t_data))
+
+class InTicketBoostPromptView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🚀 Boost a Server", style=discord.ButtonStyle.primary, custom_id="boost_modal_btn")
-    async def boost_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(BoostModal())
+    @discord.ui.button(label="🚀 Apply Boosts to Server", style=discord.ButtonStyle.success, custom_id="btn_apply_boost_prompt")
+    async def btn_apply(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(InTicketApplyBoostModal())
+
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="btn_close_prompt")
+    async def btn_close(self, interaction: discord.Interaction, button: Button):
+        db = load_tickets_db()
+        t_data = db.get(str(interaction.channel.id), {"user_name": interaction.user.name, "user_id": interaction.user.id, "topic": "Order"})
+        await interaction.response.send_modal(TicketCloseModal(t_data))
+
+class InTicketApplyBoostModal(Modal, title="🚀 Apply Server Boosts"):
+    invite_input = TextInput(
+        label="Discord Server Invite Link",
+        placeholder="e.g. discord.gg/yourserver or yourserver",
+        required=True,
+        max_length=60
+    )
+    amount_input = TextInput(
+        label="Amount of Boosts",
+        placeholder="Even number (e.g. 2, 4, 14)",
+        required=True,
+        max_length=4
+    )
+    duration_input = TextInput(
+        label="Duration (1m or 3m)",
+        placeholder="1m or 3m",
+        required=True,
+        max_length=2
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(self.amount_input.value.strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ Amount must be a valid number.", ephemeral=True)
+
+        if amount <= 0 or amount % 2 != 0:
+            return await interaction.response.send_message("❌ Amount must be an even positive number.", ephemeral=True)
+
+        dur = self.duration_input.value.strip().lower()
+        if dur not in ["1m", "3m"]:
+            return await interaction.response.send_message("❌ Duration must be `1m` or `3m`.", ephemeral=True)
+
+        months = int(dur.replace("m", ""))
+        invite = self.invite_input.value.strip()
+
+        if not is_owner(interaction.user):
+            bal = get_user_balance(interaction.user.id)
+            current_credits = bal.get(dur, 0)
+            if current_credits < amount:
+                return await interaction.response.send_message(
+                    f"❌ Insufficient `{dur}` credits! You have `{current_credits}`, but need `{amount}`.\nPurchase more credits above!",
+                    ephemeral=True
+                )
+            deduct_user_balance(interaction.user.id, dur, amount)
+
+        await interaction.response.send_message(f"🚀 Deploying `{amount}`x `{dur}` boosts to **{invite}**...", ephemeral=True)
+        await execute_boost(invite, amount, months, interaction.user.id, interaction.channel)
 
 # ==========================================
 # Background Payment Poller
@@ -267,12 +350,30 @@ async def auto_poll_invoice(invoice_id: str, message: discord.Message, channel: 
                     await message.edit(embed=embed, view=None)
 
                 code = inv.get("redeem_key", "Generated")
-                await channel.send(f"🎉 <@{user_id}> **Payment Confirmed for `{inv.get('amount', inv.get('ltc_amount'))} {inv.get('crypto', 'LTC').upper()}`!**\nYour redeem code: `{code}`\nAdded `{inv['boosts']}`x `{inv['duration']}` boost credits to your balance.")
+                c_name = inv.get("crypto", "LTC").upper()
+                total_amt = inv.get("amount", inv.get("ltc_amount"))
+
+                celebrate_embed = discord.Embed(
+                    title="🎉 Payment Confirmed & Delivered!",
+                    description=(
+                        f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+                        f"◈ **Received**: `{total_amt} {c_name}`\n"
+                        f"◈ **Credits Added**: `{inv['boosts']}x {inv['duration']}`\n"
+                        f"◈ **Receipt Key**: `{code}`\n\n"
+                        f"*(Credits are deposited to your account. Use button below to boost your server!)*"
+                    ),
+                    color=AIZEN_ACCENT
+                )
+                celebrate_embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
 
                 if inv.get("target_invite"):
                     months_num = int(inv["duration"].replace("m", ""))
                     deduct_user_balance(inv["user_id"], inv["duration"], inv["boosts"])
+                    await channel.send(content=f"<@{user_id}>", embed=celebrate_embed)
                     await execute_boost(inv["target_invite"], inv["boosts"], months_num, user_id, channel)
+                else:
+                    boost_view = InTicketBoostPromptView()
+                    await channel.send(content=f"<@{user_id}>", embed=celebrate_embed, view=boost_view)
                 break
 
             inv_data = get_invoice(invoice_id)
@@ -362,11 +463,16 @@ class CryptoSelect(Select):
         self.amount = amount
         self.invite = invite
         self.discount = discount
+        r_ltc = round(get_rate_for_crypto("ltc", duration) * amount, 4)
+        r_usdt = round(get_rate_for_crypto("usdt", duration) * amount, 2)
+        r_btc = round(get_rate_for_crypto("btc", duration) * amount, 6)
+        r_sol = round(get_rate_for_crypto("sol", duration) * amount, 4)
+
         options = [
-            discord.SelectOption(label="Litecoin (LTC)", value="ltc", emoji="🪙", description="Lowest network fees • Instant auto-confirm"),
-            discord.SelectOption(label="Tether USDT", value="usdt", emoji="💵", description="Stablecoin (Zero volatility)"),
-            discord.SelectOption(label="Bitcoin (BTC)", value="btc", emoji="₿", description="The standard cryptocurrency"),
-            discord.SelectOption(label="Solana (SOL)", value="sol", emoji="🟣", description="High-speed Solana network")
+            discord.SelectOption(label=f"Litecoin (LTC) ~ {r_ltc} LTC", value="ltc", emoji="🪙", description="Lowest network fees • Instant auto-confirm"),
+            discord.SelectOption(label=f"Tether USDT ~ ${r_usdt} USDT", value="usdt", emoji="💵", description="Stablecoin (Zero volatility)"),
+            discord.SelectOption(label=f"Bitcoin (BTC) ~ {r_btc} BTC", value="btc", emoji="₿", description="The standard cryptocurrency"),
+            discord.SelectOption(label=f"Solana (SOL) ~ {r_sol} SOL", value="sol", emoji="🟣", description="High-speed Solana network")
         ]
         super().__init__(placeholder="💎 Choose Your Payment Cryptocurrency...", min_values=1, max_values=1, options=options)
 
@@ -376,37 +482,34 @@ class CryptoSelect(Select):
 
 class CryptoSelectionView(View):
     def __init__(self, duration: str, amount: int, invite: Optional[str] = None, discount: Optional[str] = None):
-        super().__init__(timeout=180)
+        super().__init__(timeout=300)
         self.add_item(CryptoSelect(duration, amount, invite, discount))
 
-class BuyOrderModal(Modal):
-    def __init__(self, duration: str):
-        super().__init__(title=f"⚔️ Buy {duration.upper()} Boosts")
-        self.duration = duration
-
-        self.amount_input = TextInput(
-            label="Amount of Boosts",
-            placeholder="Must be an even number (e.g. 2, 4, 14)",
-            required=True,
-            max_length=4
-        )
-        self.add_item(self.amount_input)
-
-        self.invite_input = TextInput(
-            label="Server Invite (Optional for Auto-Boost)",
-            placeholder="e.g. discord.gg/yourserver (boosts instantly upon payment)",
-            required=False,
-            max_length=60
-        )
-        self.add_item(self.invite_input)
-
-        self.discount_input = TextInput(
-            label="Promo / Discount Code (Optional)",
-            placeholder="e.g. SUMMER10",
-            required=False,
-            max_length=20
-        )
-        self.add_item(self.discount_input)
+class InTicketCustomOrderModal(Modal, title="✏️ Custom Boost Order"):
+    amount_input = TextInput(
+        label="Amount of Boosts",
+        placeholder="Even number (e.g. 2, 4, 14, 30)",
+        required=True,
+        max_length=4
+    )
+    duration_input = TextInput(
+        label="Duration (1m or 3m)",
+        placeholder="1m or 3m",
+        required=True,
+        max_length=2
+    )
+    invite_input = TextInput(
+        label="Server Invite (Optional for Auto-Boost)",
+        placeholder="e.g. discord.gg/yourserver (boosts instantly upon payment)",
+        required=False,
+        max_length=60
+    )
+    discount_input = TextInput(
+        label="Discount / Promo Code (Optional)",
+        placeholder="e.g. PROMO10",
+        required=False,
+        max_length=20
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -417,6 +520,10 @@ class BuyOrderModal(Modal):
         if amount <= 0 or amount % 2 != 0:
             return await interaction.response.send_message("❌ Amount must be an even positive number (2 boosts per token).", ephemeral=True)
 
+        duration = self.duration_input.value.strip().lower()
+        if duration not in ["1m", "3m"]:
+            return await interaction.response.send_message("❌ Duration must be `1m` or `3m`.", ephemeral=True)
+
         invite = self.invite_input.value.strip() or None
         discount = self.discount_input.value.strip().upper() or None
 
@@ -424,14 +531,147 @@ class BuyOrderModal(Modal):
             title=f"⚔️ Sōsuke Aizen — Select Payment Currency",
             description=(
                 f"*\"No one stands on the heavens from the beginning.\"*\n\n"
-                f"◈ **Product**: `{amount}x {self.duration}` Boosts\n"
-                f"◈ **Target**: `{invite or 'Credit to Account / Redeem Code'}`\n\n"
-                f"Select your preferred cryptocurrency below to generate your invoice:"
+                f"◈ **Order**: `{amount}x {duration.upper()}` Boosts\n"
+                f"◈ **Target**: `{invite or 'Account Credits (Apply anytime)'}`\n"
+                + (f"◈ **Promo Code**: `{discount}`\n" if discount else "")
+                + f"\nSelect your payment cryptocurrency below to generate your invoice:"
             ),
             color=AIZEN_COLOR
         )
-        view = CryptoSelectionView(self.duration, amount, invite, discount)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view = CryptoSelectionView(duration, amount, invite, discount)
+        await interaction.response.send_message(embed=embed, view=view)
+
+class InTicketPackageSelect(Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="2 Boosts (1 Month)", value="2_1m", emoji="⚡", description="Quick package • 1 Token"),
+            discord.SelectOption(label="4 Boosts (1 Month)", value="4_1m", emoji="⚡", description="Level 1 Discord Server • 2 Tokens"),
+            discord.SelectOption(label="14 Boosts (1 Month)", value="14_1m", emoji="⚡", description="Level 3 Discord Server • 7 Tokens"),
+            discord.SelectOption(label="30 Boosts (1 Month)", value="30_1m", emoji="⚡", description="VIP Discord Package • 15 Tokens"),
+            discord.SelectOption(label="2 Boosts (3 Months)", value="2_3m", emoji="🔥", description="3-Month Package • 1 Token"),
+            discord.SelectOption(label="4 Boosts (3 Months)", value="4_3m", emoji="🔥", description="3-Month Level 1 • 2 Tokens"),
+            discord.SelectOption(label="14 Boosts (3 Months)", value="14_3m", emoji="🔥", description="3-Month Level 3 • 7 Tokens"),
+            discord.SelectOption(label="30 Boosts (3 Months)", value="30_3m", emoji="🔥", description="3-Month VIP Package • 15 Tokens"),
+        ]
+        super().__init__(placeholder="💎 Choose a Boost Package to Purchase...", min_values=1, max_values=1, options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        val = self.values[0]
+        amt_str, dur = val.split("_")
+        amount = int(amt_str)
+
+        embed = discord.Embed(
+            title=f"⚔️ Sōsuke Aizen — Select Payment Currency",
+            description=(
+                f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+                f"◈ **Selected Product**: `{amount}x {dur.upper()}` Boosts\n\n"
+                f"Select your preferred cryptocurrency below to generate your invoice & QR code:"
+            ),
+            color=AIZEN_COLOR
+        )
+        view = CryptoSelectionView(dur, amount)
+        await interaction.response.send_message(embed=embed, view=view)
+
+class InTicketOrderTerminalView(View):
+    def __init__(self, ticket_channel: discord.TextChannel, user: discord.Member):
+        super().__init__(timeout=None)
+        self.ticket_channel = ticket_channel
+        self.user = user
+        self.add_item(InTicketPackageSelect())
+
+    @discord.ui.button(label="✏️ Custom Order & Link", style=discord.ButtonStyle.primary, custom_id="btn_tkt_custom_order", row=1)
+    async def btn_custom(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(InTicketCustomOrderModal())
+
+    @discord.ui.button(label="🚀 Boost Server Now", style=discord.ButtonStyle.success, custom_id="btn_tkt_boost_now", row=1)
+    async def btn_boost(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(InTicketApplyBoostModal())
+
+    @discord.ui.button(label="💳 My Balance", style=discord.ButtonStyle.secondary, custom_id="btn_tkt_bal", row=2)
+    async def btn_bal(self, interaction: discord.Interaction, button: Button):
+        bal = get_user_balance(interaction.user.id)
+        embed = discord.Embed(
+            title=f"💳 Boost Credits — {interaction.user.name}",
+            description=f"◈ **1-Month Boosts**: `{bal['1m']}` credits\n◈ **3-Month Boosts**: `{bal['3m']}` credits",
+            color=AIZEN_COLOR
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="btn_tkt_close_term", row=2)
+    async def btn_close(self, interaction: discord.Interaction, button: Button):
+        db = load_tickets_db()
+        t_data = db.get(str(interaction.channel.id), {"user_name": interaction.user.name, "user_id": interaction.user.id, "topic": "Order"})
+        await interaction.response.send_modal(TicketCloseModal(t_data))
+
+async def send_order_terminal(ticket_channel: discord.TextChannel, user: discord.Member, preload_data: dict = None):
+    """Initializes the Auto-Buy order terminal inside a private ticket channel."""
+    if preload_data:
+        duration = preload_data.get("duration", "1m")
+        amount = preload_data.get("amount", 2)
+        invite = preload_data.get("invite")
+        discount = preload_data.get("discount")
+
+        embed = discord.Embed(
+            title="⚔️ SŌSUKE AIZEN | AUTO-BUY ORDER TERMINAL",
+            description=(
+                f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+                f"Welcome {user.mention} to your private checkout chamber.\n\n"
+                f"◈ **Product**: `{amount}x {duration.upper()}` Boosts\n"
+                f"◈ **Target**: `{invite or 'Account Credits (Boost anytime)'}`\n"
+                + (f"◈ **Discount Code**: `{discount}`\n" if discount else "")
+                + f"\n**Select your preferred cryptocurrency below to generate your invoice:**"
+            ),
+            color=AIZEN_COLOR
+        )
+        embed.set_footer(text="Instant Auto-Delivery • Blockchain Confirmed")
+        view = CryptoSelectionView(duration, amount, invite, discount)
+        await ticket_channel.send(content=f"{user.mention}", embed=embed, view=view)
+    else:
+        t1m = len(getStock("data/1m.txt") or [])
+        t3m = len(getStock("data/3m.txt") or [])
+        embed = discord.Embed(
+            title="⚔️ SŌSUKE AIZEN | AUTO-BUY ORDER TERMINAL",
+            description=(
+                f"*\"No one stands on the heavens from the beginning. Neither you, nor I, not even God.\"*\n\n"
+                f"Welcome {user.mention} to your private automated order terminal.\n"
+                f"All payments, blockchain confirmations, credit allocation, and server boosts are **100% automated** in this ticket.\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"**📦 Live Stock Status**:\n"
+                f"◈ 1-Month Boosts Available: `{t1m * 2}` boosts (`{t1m}` tokens)\n"
+                f"◈ 3-Month Boosts Available: `{t3m * 2}` boosts (`{t3m}` tokens)\n\n"
+                f"**🚀 Supported Cryptocurrencies**:\n"
+                f"`🪙 Litecoin (LTC)` • `💵 Tether USDT` • `₿ Bitcoin (BTC)` • `🟣 Solana (SOL)`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"**Instructions**:\n"
+                f"1. Choose a popular package from the dropdown below,\n"
+                f"2. Or click **\"✏️ Custom Order & Link\"** to enter a custom quantity or server invite.\n"
+                f"3. Your invoice will be generated directly in this channel."
+            ),
+            color=AIZEN_COLOR
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine | 100% Automated")
+        view = InTicketOrderTerminalView(ticket_channel, user)
+        await ticket_channel.send(content=f"{user.mention}", embed=embed, view=view)
+
+class RedeemKeyModal(Modal, title="🔑 Redeem Boost Key"):
+    code_input = TextInput(
+        label="Enter License / Key Code",
+        placeholder="e.g. BOOST-1M-2X-ABCD-1234",
+        required=True,
+        max_length=60
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        key_code = self.code_input.value.strip().upper()
+        success, msg, item = redeem_boost_key(key_code, interaction.user.id)
+        color = AIZEN_ACCENT if success else discord.Color.red()
+        embed = discord.Embed(title="🔑 Key Redemption", description=msg, color=color)
+        if success and item:
+            bal = get_user_balance(interaction.user.id)
+            embed.add_field(name="Updated Balance", value=f"• 1-Month: `{bal['1m']}` boosts\n• 3-Month: `{bal['3m']}` boosts", inline=False)
+            embed.set_footer(text=f"Use $boost <invite> {item['amount']} {item['duration'].replace('m', '')} to apply your boosts!")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ==========================================
 # All-in-One Persistent Shop Panel View
@@ -441,15 +681,28 @@ class ShopPanelView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🛒 Buy 1-Month Boosts", style=discord.ButtonStyle.primary, custom_id="shop_btn_buy_1m", row=0)
-    async def btn_buy_1m(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(BuyOrderModal("1m"))
+    @discord.ui.button(label="🛒 Buy Boosts (Instant Checkout Ticket)", style=discord.ButtonStyle.primary, custom_id="shop_btn_buy_ticket", row=0)
+    async def btn_buy_ticket(self, interaction: discord.Interaction, button: Button):
+        ticket_channel, is_new, ticket_data = await create_or_get_ticket(
+            guild=interaction.guild,
+            user=interaction.user,
+            topic_key="order",
+            owners_list=HARDCODED_OWNERS,
+            bot_ref=bot
+        )
+        if is_new:
+            await send_order_terminal(ticket_channel, interaction.user)
+            await interaction.response.send_message(
+                f"⚔️ **Private Auto-Buy Ticket Created:** {ticket_channel.mention}\n*Please proceed to your ticket to configure your order and pay.*",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"⚔️ You already have an active checkout ticket: {ticket_channel.mention}! Please proceed there to manage your purchases.",
+                ephemeral=True
+            )
 
-    @discord.ui.button(label="🚀 Buy 3-Month Boosts", style=discord.ButtonStyle.primary, custom_id="shop_btn_buy_3m", row=0)
-    async def btn_buy_3m(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(BuyOrderModal("3m"))
-
-    @discord.ui.button(label="🎫 Open Ticket", style=discord.ButtonStyle.success, custom_id="shop_btn_ticket", row=0)
+    @discord.ui.button(label="🎫 Open Support Ticket", style=discord.ButtonStyle.success, custom_id="shop_btn_ticket", row=0)
     async def btn_ticket(self, interaction: discord.Interaction, button: Button):
         view = TicketTopicLaunchView(bot, HARDCODED_OWNERS)
         await interaction.response.send_message(
@@ -468,16 +721,28 @@ class ShopPanelView(View):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="📦 Live Stock", style=discord.ButtonStyle.secondary, custom_id="shop_btn_stock", row=1)
+    @discord.ui.button(label="📦 Stock & Rates", style=discord.ButtonStyle.secondary, custom_id="shop_btn_stock", row=1)
     async def btn_stock(self, interaction: discord.Interaction, button: Button):
         t1m = len(getStock("data/1m.txt") or [])
         t3m = len(getStock("data/3m.txt") or [])
         embed = discord.Embed(
-            title="📦 Real-Time Stock Availability",
-            description=f"◈ **1-Month Tokens**: `{t1m}` tokens (`{t1m * 2}` boosts)\n◈ **3-Month Tokens**: `{t3m}` tokens (`{t3m * 2}` boosts)",
+            title="📦 Real-Time Stock Availability & Rates",
+            description=(
+                f"◈ **1-Month Tokens**: `{t1m}` tokens (`{t1m * 2}` boosts)\n"
+                f"◈ **3-Month Tokens**: `{t3m}` tokens (`{t3m * 2}` boosts)\n\n"
+                f"**Current Rates (Per 2 Boosts / 1 Token)**:\n"
+                f"• 🪙 **LTC**: `{get_rate_for_crypto('ltc', '1m') * 2} LTC` (1m) | `{get_rate_for_crypto('ltc', '3m') * 2} LTC` (3m)\n"
+                f"• 💵 **USDT**: `${get_rate_for_crypto('usdt', '1m') * 2} USDT` (1m) | `${get_rate_for_crypto('usdt', '3m') * 2} USDT` (3m)\n"
+                f"• ₿ **BTC**: `{get_rate_for_crypto('btc', '1m') * 2} BTC` (1m) | `{get_rate_for_crypto('btc', '3m') * 2} BTC` (3m)\n"
+                f"• 🟣 **SOL**: `{get_rate_for_crypto('sol', '1m') * 2} SOL` (1m) | `{get_rate_for_crypto('sol', '3m') * 2} SOL` (3m)"
+            ),
             color=AIZEN_COLOR
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🔑 Redeem Key", style=discord.ButtonStyle.secondary, custom_id="shop_btn_redeem", row=1)
+    async def btn_redeem(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(RedeemKeyModal())
 
 # ==========================================
 # Bot Startup & Sync
@@ -629,80 +894,54 @@ async def cmd_boost(ctx: commands.Context, invite: str = None, amount: int = Non
     await execute_boost(invite, amount, months, ctx.author.id, ctx.channel)
 
 # ==========================================
-# Modular Multi-Crypto Buy Command
+# In-Ticket Auto-Buy Command
 # ==========================================
 
 @bot.command(name="buy")
 @commands.cooldown(1, 3, commands.BucketType.user)
-async def cmd_buy(ctx: commands.Context, duration: str = None, amount: int = None, crypto: str = None, *args):
+async def cmd_buy(ctx: commands.Context, duration: str = None, amount: int = None, *args):
     """
-    Buy boosts with Litecoin, USDT, Bitcoin, or Solana.
+    Buy boosts inside a secure private ticket channel.
     Usage:
-      $buy 1m 2 ltc
-      $buy 1m 2 usdt discord.gg/example
-      $buy (opens modular selector modal)
+      $buy
+      $buy 1m 2
+      $buy 1m 14 https://discord.gg/xyz
     """
-    if not duration or not amount:
-        embed = discord.Embed(
-            title="⚔️ Aizen Portal — Purchase Boost Credits",
-            description=(
-                f"*\"No one stands on the heavens from the beginning.\"*\n\n"
-                f"**Select your duration below to configure your order**:\n"
-                f"◈ Supported Coins: `🪙 LTC` • `💵 USDT` • `₿ BTC` • `🟣 SOL`\n"
-                f"◈ Instant Delivery: Server invite can be included for auto-boosting!"
-            ),
-            color=AIZEN_COLOR
-        )
-        view = View()
-        view.add_item(Button(label="🛒 Buy 1-Month", style=discord.ButtonStyle.primary, custom_id="quick_buy_1m"))
-        view.add_item(Button(label="🚀 Buy 3-Month", style=discord.ButtonStyle.primary, custom_id="quick_buy_3m"))
+    if not ctx.guild:
+        return await ctx.send("❌ This command must be used inside a server.")
 
-        async def qb1_callback(interaction: discord.Interaction):
-            await interaction.response.send_modal(BuyOrderModal("1m"))
-        async def qb3_callback(interaction: discord.Interaction):
-            await interaction.response.send_modal(BuyOrderModal("3m"))
+    ticket_channel, is_new, ticket_data = await create_or_get_ticket(
+        guild=ctx.guild,
+        user=ctx.author,
+        topic_key="order",
+        owners_list=HARDCODED_OWNERS,
+        bot_ref=bot
+    )
 
-        view.children[0].callback = qb1_callback
-        view.children[1].callback = qb3_callback
-        return await ctx.send(embed=embed, view=view)
+    preload = None
+    if duration and amount:
+        dur_clean = duration.lower().strip()
+        if dur_clean in ["1m", "3m"] and amount > 0 and amount % 2 == 0:
+            target_invite = None
+            discount_code = None
+            for a in args:
+                if "discord.gg" in a or "discord.com" in a or len(a) > 5 and not a.startswith("code:"):
+                    target_invite = a
+                elif a.startswith("code:"):
+                    discount_code = a.replace("code:", "").strip().upper()
+            preload = {
+                "duration": dur_clean,
+                "amount": amount,
+                "invite": target_invite,
+                "discount": discount_code
+            }
 
-    dur_clean = duration.lower().strip()
-    if dur_clean not in ["1m", "3m"]:
-        return await ctx.send("❌ Duration must be `1m` or `3m`.")
+    await send_order_terminal(ticket_channel, ctx.author, preload_data=preload)
 
-    if amount % 2 != 0 or amount <= 0:
-        return await ctx.send("❌ Amount must be an even positive number (2, 4, 14, etc.).")
-
-    # If crypto was not provided or was an invite, show crypto selection view
-    target_crypto = crypto.lower().strip() if crypto and crypto.lower() in ["ltc", "usdt", "btc", "sol"] else None
-    target_invite = None
-    discount_code = None
-
-    for arg in ([crypto] if crypto and crypto.lower() not in ["ltc", "usdt", "btc", "sol"] else []) + list(args):
-        if "discord.gg" in arg or "discord.com" in arg or len(arg) > 4 and not arg.startswith("code:"):
-            target_invite = arg
-        elif arg.startswith("code:"):
-            discount_code = arg.replace("code:", "").strip().upper()
-
-    if not target_crypto:
-        embed = discord.Embed(
-            title=f"⚔️ Sōsuke Aizen — Choose Payment Currency",
-            description=f"Order: `{amount}x {dur_clean}` Boosts.\nPlease select which cryptocurrency you want to pay with:",
-            color=AIZEN_COLOR
-        )
-        view = CryptoSelectionView(dur_clean, amount, target_invite, discount_code)
-        return await ctx.send(embed=embed, view=view)
-
-    # Fake interaction adapter for text command
-    class MsgInteraction:
-        def __init__(self, context):
-            self.user = context.author
-            self.channel = context.channel
-            self.response = type("Resp", (), {"is_done": lambda: True})()
-            self.followup = type("Follow", (), {"send": lambda *a, **kw: context.send(*a, **kw)})()
-
-    fake_interaction = MsgInteraction(ctx)
-    await generate_crypto_invoice(fake_interaction, dur_clean, amount, target_crypto, target_invite, discount_code)
+    if is_new:
+        await ctx.send(f"⚔️ **Private Auto-Buy Ticket Created:** {ticket_channel.mention}\n*Please proceed to your ticket to select your coin and complete payment.*")
+    else:
+        await ctx.send(f"⚔️ **Your Order Ticket is Ready:** {ticket_channel.mention}\n*Order updated in your active ticket.*")
 
 # ==========================================
 # Redeem Code Command
