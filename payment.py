@@ -246,21 +246,24 @@ def create_invoice(
     user_id: int,
     duration: str,
     boosts: int,
-    ltc_amount: float,
+    amount: float,
     address: str,
+    crypto: str = "ltc",
     target_invite: Optional[str] = None,
     discount_code: Optional[str] = None
 ) -> Dict[str, Any]:
     invoices = load_json(INVOICES_FILE, {})
     invoice_id = f"INV-{int(time.time())}-{user_id % 10000}"
-    current_received = get_address_total_received(address)
+    current_received = get_address_total_received(address) if crypto.lower() == "ltc" else 0.0
 
     invoice = {
         "id": invoice_id,
         "user_id": user_id,
         "duration": duration,
         "boosts": boosts,
-        "ltc_amount": round(ltc_amount, 6),
+        "crypto": crypto.lower(),
+        "amount": round(amount, 6),
+        "ltc_amount": round(amount, 6),
         "address": address,
         "target_invite": target_invite,
         "discount_code": discount_code,
@@ -273,10 +276,40 @@ def create_invoice(
     save_json(INVOICES_FILE, invoices)
     return invoice
 
-def get_ltc_qr_url(address: str, amount: float) -> str:
-    """Generates standard BIP21 Litecoin QR code image URL."""
-    uri = f"litecoin:{address}?amount={amount}"
+# ==========================================
+# Multi-Crypto & Wallet Management
+# ==========================================
+
+CRYPTO_NAMES = {
+    "ltc": "Litecoin (LTC)",
+    "usdt": "Tether USDT (TRC20 / BEP20)",
+    "btc": "Bitcoin (BTC)",
+    "sol": "Solana (SOL)"
+}
+
+DEFAULT_CRYPTO_RATES = {
+    "ltc": {"1m": 0.25, "3m": 0.50},
+    "usdt": {"1m": 1.00, "3m": 2.00},
+    "btc": {"1m": 0.000020, "3m": 0.000040},
+    "sol": {"1m": 0.008, "3m": 0.016}
+}
+
+def get_crypto_qr_url(crypto: str, address: str, amount: float) -> str:
+    """Generates standard QR code image URL for LTC, BTC, SOL, USDT."""
+    c = crypto.lower().strip()
+    if c == "ltc":
+        uri = f"litecoin:{address}?amount={amount}"
+    elif c == "btc":
+        uri = f"bitcoin:{address}?amount={amount}"
+    elif c == "sol":
+        uri = f"solana:{address}?amount={amount}"
+    else:
+        uri = address  # Raw address for USDT
     return f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={uri}"
+
+def get_ltc_qr_url(address: str, amount: float) -> str:
+    return get_crypto_qr_url("ltc", address, amount)
+
 
 def cancel_invoice(invoice_id: str, user_id: int, is_owner_user: bool = False) -> Tuple[bool, str]:
     """Allows cancelling a pending invoice."""
