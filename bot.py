@@ -19,15 +19,31 @@ from payment import (
     check_invoice_payment,
     force_complete_invoice,
     get_invoice,
+    generate_boost_key,
+    redeem_boost_key,
+    get_wallet_live_info,
+    create_discount,
+    get_discount_percent,
+    get_sales_stats,
+    list_all_keys,
     USED_TOKENS_FILE
 )
 
+CONFIG_PATH = "config/config.yaml"
+
 def load_config():
     try:
-        with open("config/config.yaml", "r", encoding="utf-8") as f:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except FileNotFoundError:
         return {}
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f)
+    except Exception as e:
+        print(f"Error saving config: {e}")
 
 config = load_config()
 
@@ -64,12 +80,78 @@ intents.message_content = True
 bot = commands.Bot(command_prefix=prefix, intents=intents, help_command=None)
 
 # ==========================================
+# Core Boosting Helper
+# ==========================================
+
+async def execute_boost(invite_str: str, amount: int, months: int, user_id: int, channel: discord.abc.Messageable):
+    """Executes the full boosting process and handles stock removal and token archiving."""
+    dur_key = f"{months}m"
+    invite_code = getinviteCode(invite_str)
+    guild_id = checkInvite(invite_code)
+
+    if not guild_id:
+        return await channel.send(embed=discord.Embed(
+            title="❌ Invalid Invite",
+            description=f"Could not reach server with invite code: `.gg/{invite_code}`",
+            color=0xFF0000
+        ))
+
+    filename = "data/1m.txt" if months == 1 else "data/3m.txt"
+    stock = getStock(filename) or []
+    required_tokens = int(amount / 2)
+
+    if required_tokens > len(stock):
+        return await channel.send(embed=discord.Embed(
+            title="❌ Stock Empty",
+            description=f"The bot is temporarily out of stock! Need `{required_tokens}` tokens, but only `{len(stock)}` available in `{filename}`.",
+            color=0xFF0000
+        ))
+
+    tokens_to_use = stock[:required_tokens]
+    for token in tokens_to_use:
+        remove(token, filename)
+
+    status_msg = await channel.send(embed=discord.Embed(
+        title="⏳ Instant Boosting in Progress...",
+        description=f"Applying `{amount}` boosts to **.gg/{invite_code}** using `{required_tokens}` tokens...\nPlease wait.",
+        color=0xFEE75C
+    ))
+
+    session_folder = create_session_folder()
+    booster = Booster(session_folder)
+    start_time = time.time()
+
+    def do_boost():
+        return booster.thread(invite_code, tokens_to_use, guild_id)
+
+    status = await asyncio.to_thread(do_boost)
+    elapsed = round(time.time() - start_time, 2)
+
+    # Archive used tokens so they never mix with stock
+    archive_used_tokens(tokens_to_use, dur_key, invite_code)
+
+    success_count = len(status.get("success", [])) * 2 if isinstance(status, dict) else 0
+    failed_count = len(status.get("failed", [])) * 2 if isinstance(status, dict) else 0
+
+    result_embed = discord.Embed(
+        title="✅ Instant Boosting Complete",
+        description=f"Finished boosting **.gg/{invite_code}** in `{elapsed}s`.",
+        color=0x57F287 if success_count > 0 else 0xED4245
+    )
+    result_embed.add_field(name="Successful Boosts", value=f"`{success_count}` applied", inline=True)
+    result_embed.add_field(name="Failed Boosts", value=f"`{failed_count}` failed", inline=True)
+    result_embed.add_field(name="Tokens Used & Archived", value=f"`{required_tokens}` tokens", inline=True)
+    result_embed.set_footer(text="BoostBot Crafted by .gg/coderz")
+
+    await status_msg.edit(embed=result_embed)
+
+# ==========================================
 # Payment View with Interactive Buttons
 # ==========================================
 
 class PaymentView(View):
     def __init__(self, invoice_id: str, ltc_addy: str, expected_ltc: float):
-        super().__init__(timeout=3600)  # 60 minute button validity
+        super().__init__(timeout=3600)
         self.invoice_id = invoice_id
         self.ltc_addy = ltc_addy
         self.expected_ltc = expected_ltc
@@ -83,9 +165,25 @@ class PaymentView(View):
             embed = interaction.message.embeds[0]
             embed.title = "✅ Payment Confirmed & Delivered!"
             embed.color = 0x57F287
-            embed.set_field_at(3, name="Status", value="`PAID & CREDITED`", inline=False)
+            embed.set_field_at(3, name="Status", value="`PAID & DELIVERED`", inline=False)
             await interaction.message.edit(embed=embed, view=None)
-            await interaction.followup.send(f"🎉 **Payment Verified!** {msg}\nUse `{prefix}boost <invite> {inv['boosts']} {inv['duration'].replace('m', '')}` to apply your boosts!", ephemeral=True)
+
+            code = inv.get("redeem_key", "Generated")
+            dm_msg = f"🎉 **Payment Verified!**\nYour redeemable code: `{code}`\nAdded `{inv['boosts']}`x `{inv['duration']}` boost credits to your balance!"
+
+            # Try to DM buyer with their code
+            try:
+                await interaction.user.send(dm_msg)
+            except Exception:
+                pass
+
+            await interaction.followup.send(f"🎉 **Payment Verified!**\nYour instant code: `{code}`\nUse `{prefix}boost <invite> {inv['boosts']} {inv['duration'].replace('m', '')}` to apply your boosts!", ephemeral=True)
+
+            # If user provided invite at purchase time, trigger instant delivery
+            if inv.get("target_invite"):
+                months_num = int(inv["duration"].replace("m", ""))
+                deduct_user_balance(inv["user_id"], inv["duration"], inv["boosts"])
+                await execute_boost(inv["target_invite"], inv["boosts"], months_num, inv["user_id"], interaction.channel)
         else:
             await interaction.followup.send(f"⏳ {msg}\n*If you just sent the transaction, please allow 1-2 minutes for the Litecoin network to broadcast it.*", ephemeral=True)
 
@@ -106,8 +204,8 @@ class BoostLaunchView(View):
 # ==========================================
 
 async def auto_poll_invoice(invoice_id: str, message: discord.Message, channel: discord.abc.Messageable, user_id: int):
-    """Periodically checks blockchain for 30 minutes in background."""
-    for _ in range(60):  # 60 checks * 30 seconds = 30 minutes
+    """Periodically checks blockchain in background for 30 minutes."""
+    for _ in range(60):
         await asyncio.sleep(30)
         try:
             paid, msg, inv = check_invoice_payment(invoice_id)
@@ -116,10 +214,19 @@ async def auto_poll_invoice(invoice_id: str, message: discord.Message, channel: 
                     embed = message.embeds[0]
                     embed.title = "✅ Payment Confirmed & Delivered!"
                     embed.color = 0x57F287
-                    embed.set_field_at(3, name="Status", value="`PAID & CREDITED`", inline=False)
+                    embed.set_field_at(3, name="Status", value="`PAID & DELIVERED`", inline=False)
                     await message.edit(embed=embed, view=None)
-                await channel.send(f"🎉 <@{user_id}> **Your payment of `{inv['ltc_amount']} LTC` was confirmed!**\nAdded `{inv['boosts']}`x `{inv['duration']}` boost credits to your balance.\nUse `{prefix}boost <invite> {inv['boosts']} {inv['duration'].replace('m', '')}` to boost!")
+
+                code = inv.get("redeem_key", "Generated")
+                await channel.send(f"🎉 <@{user_id}> **Payment Confirmed for `{inv['ltc_amount']} LTC`!**\nYour instant redeem code: `{code}`\nAdded `{inv['boosts']}`x `{inv['duration']}` boost credits to your balance.")
+
+                # If user provided invite link, execute instant boost!
+                if inv.get("target_invite"):
+                    months_num = int(inv["duration"].replace("m", ""))
+                    deduct_user_balance(inv["user_id"], inv["duration"], inv["boosts"])
+                    await execute_boost(inv["target_invite"], inv["boosts"], months_num, user_id, channel)
                 break
+
             inv_data = get_invoice(invoice_id)
             if not inv_data or inv_data.get("status") != "pending":
                 break
@@ -132,13 +239,13 @@ async def auto_poll_invoice(invoice_id: str, message: discord.Message, channel: 
 
 @bot.event
 async def on_ready():
-    print("=" * 55)
+    print("=" * 60)
     print(f" [+] Bot Logged in as: {bot.user.name} ({bot.user.id})")
     print(f" [+] Prefix: {prefix}")
     print(f" [+] Authorized Owners: {owner_ids}")
-    print(f" [+] LTC Address: {ltc_address or 'NOT SET (Configure in config.yaml)'}")
+    print(f" [+] LTC Address: {ltc_address or 'NOT SET (Use $setwallet to configure)'}")
     print(f" [+] Pricing: 1m = {price_1m} LTC/boost | 3m = {price_3m} LTC/boost")
-    print("=" * 55)
+    print("=" * 60)
     try:
         synced = await bot.tree.sync()
         print(f" [+] Synced {len(synced)} Slash Commands.")
@@ -160,7 +267,6 @@ async def cmd_boost(ctx: commands.Context, invite: str = None, amount: int = Non
     Owners have UNLIMITED boosts.
     Regular users consume their credits.
     """
-    # If no parameters provided, send button to open interactive modal
     if not invite or not amount or not months:
         embed = discord.Embed(
             title="🚀 Discord Server Booster",
@@ -176,11 +282,10 @@ async def cmd_boost(ctx: commands.Context, invite: str = None, amount: int = Non
         view = BoostLaunchView()
         return await ctx.send(embed=embed, view=view)
 
-    # Validate parameters
     if amount % 2 != 0 or amount <= 0:
         return await ctx.send(embed=discord.Embed(
             title="❌ Invalid Amount",
-            description="Number of boosts must be a positive even number (2 boosts per token).",
+            description="Number of boosts must be an even positive number (2 boosts per token).",
             color=0xFF0000
         ))
 
@@ -193,7 +298,6 @@ async def cmd_boost(ctx: commands.Context, invite: str = None, amount: int = Non
 
     dur_key = f"{months}m"
 
-    # Check credit balance if not owner
     if not is_owner(ctx.author):
         bal = get_user_balance(ctx.author.id)
         current_credits = bal.get(dur_key, 0)
@@ -203,87 +307,22 @@ async def cmd_boost(ctx: commands.Context, invite: str = None, amount: int = Non
                 description=f"You need `{amount}`x {dur_key} credits, but you only have `{current_credits}`.\n\nUse `{prefix}buy {dur_key} {amount}` to auto-buy credits with Litecoin!",
                 color=0xFF0000
             ))
-
-    invite_code = getinviteCode(invite)
-    guild_id = checkInvite(invite_code)
-
-    if not guild_id:
-        return await ctx.send(embed=discord.Embed(
-            title="❌ Invalid Invite",
-            description=f"Could not reach server with invite: `.gg/{invite_code}`",
-            color=0xFF0000
-        ))
-
-    filename = "data/1m.txt" if months == 1 else "data/3m.txt"
-    stock = getStock(filename) or []
-    required_tokens = int(amount / 2)
-
-    if required_tokens > len(stock):
-        return await ctx.send(embed=discord.Embed(
-            title="❌ Stock Empty",
-            description=f"The bot is temporarily out of stock! Need `{required_tokens}` tokens, but only `{len(stock)}` available in `{filename}`.",
-            color=0xFF0000
-        ))
-
-    # Reserve tokens from stock
-    tokens_to_use = stock[:required_tokens]
-    for token in tokens_to_use:
-        remove(token, filename)
-
-    status_msg = await ctx.send(embed=discord.Embed(
-        title="⏳ Boosting in Progress...",
-        description=f"Joining and applying `{amount}` boosts to **.gg/{invite_code}**...\nPlease wait.",
-        color=0xFEE75C
-    ))
-
-    # Execute boosting logic in background thread
-    session_folder = create_session_folder()
-    booster = Booster(session_folder)
-    start_time = time.time()
-
-    def do_boost():
-        return booster.thread(invite_code, tokens_to_use, guild_id)
-
-    status = await asyncio.to_thread(do_boost)
-    elapsed = round(time.time() - start_time, 2)
-
-    # Archive used tokens so they never mix with stock
-    archive_used_tokens(tokens_to_use, dur_key, invite_code)
-
-    success_count = len(status.get("success", [])) * 2 if isinstance(status, dict) else 0
-    failed_count = len(status.get("failed", [])) * 2 if isinstance(status, dict) else 0
-
-    # Deduct credits for regular users
-    if not is_owner(ctx.author):
         deduct_user_balance(ctx.author.id, dur_key, amount)
 
-    result_embed = discord.Embed(
-        title="✅ Boosting Finished",
-        description=f"Completed boosting **.gg/{invite_code}** in `{elapsed}s`.",
-        color=0x57F287 if success_count > 0 else 0xED4245
-    )
-    result_embed.add_field(name="Successful Boosts", value=f"`{success_count}` applied", inline=True)
-    result_embed.add_field(name="Failed Boosts", value=f"`{failed_count}` failed", inline=True)
-    result_embed.add_field(name="Tokens Used & Archived", value=f"`{required_tokens}` tokens", inline=True)
-
-    if not is_owner(ctx.author):
-        new_bal = get_user_balance(ctx.author.id)
-        result_embed.add_field(name="Remaining Credits", value=f"`{new_bal[dur_key]}` {dur_key} boosts", inline=False)
-
-    result_embed.set_footer(text="BoostBot Crafted by .gg/coderz")
-    await status_msg.edit(embed=result_embed)
+    await execute_boost(invite, amount, months, ctx.author.id, ctx.channel)
 
 # ==========================================
-# Auto Buy Boosts with LTC
+# Auto Buy Boosts with LTC & Instant Delivery
 # ==========================================
 
 @bot.command(name="buy")
-async def cmd_buy(ctx: commands.Context, duration: str = None, amount: int = None):
+async def cmd_buy(ctx: commands.Context, duration: str = None, amount: int = None, *args):
     """
-    Auto-buy boost credits with Litecoin (LTC).
+    Auto-buy boost credits with instant delivery.
     Usage:
       $buy 1m 2
-      $buy 3m 14
+      $buy 1m 2 discord.gg/myinvite
+      $buy 1m 14 code:PROMO10
     """
     if not duration or not amount:
         return await ctx.send(embed=discord.Embed(
@@ -293,11 +332,11 @@ async def cmd_buy(ctx: commands.Context, duration: str = None, amount: int = Non
                 f"• **1-Month Boost**: `{price_1m} LTC` per boost (2 boosts = `{round(price_1m * 2, 4)} LTC`)\n"
                 f"• **3-Month Boost**: `{price_3m} LTC` per boost (2 boosts = `{round(price_3m * 2, 4)} LTC`)\n\n"
                 f"**Usage**:\n"
-                f"`{prefix}buy <1m|3m> <number of boosts>`\n\n"
-                f"**Examples**:\n"
-                f"`{prefix}buy 1m 2` — Buy 2x 1-month boosts\n"
-                f"`{prefix}buy 1m 14` — Buy 14x 1-month boosts (Level 3)\n"
-                f"`{prefix}buy 3m 14` — Buy 14x 3-month boosts"
+                f"`{prefix}buy <1m|3m> <amount> [optional: invite link] [optional: discount code]`\n\n"
+                f"**Features**:\n"
+                f"⚡ **Instant Delivery**: Include your invite link for immediate auto-boosting once paid!\n"
+                f"🔑 **Redeemable Key**: Receive a unique code for your records or gifts.\n"
+                f"💳 **Credits**: Unused boosts stay in your `{prefix}balance` forever."
             ),
             color=0x5865F2
         ))
@@ -307,38 +346,220 @@ async def cmd_buy(ctx: commands.Context, duration: str = None, amount: int = Non
         return await ctx.send(embed=discord.Embed(title="❌ Invalid Duration", description="Please choose `1m` or `3m`.", color=0xFF0000))
 
     if amount % 2 != 0 or amount <= 0:
-        return await ctx.send(embed=discord.Embed(title="❌ Invalid Amount", description="Boost amount must be a positive even number (2, 4, 14, etc.).", color=0xFF0000))
+        return await ctx.send(embed=discord.Embed(title="❌ Invalid Amount", description="Boost amount must be an even positive number (2, 4, 14, etc.).", color=0xFF0000))
+
+    # Parse optional arguments (invite link or discount code)
+    target_invite = None
+    discount_code = None
+    for arg in args:
+        if "discord.gg" in arg or "discord.com" in arg or len(arg) > 4 and not arg.startswith("code:"):
+            target_invite = arg
+        elif arg.startswith("code:"):
+            discount_code = arg.replace("code:", "").strip().upper()
 
     rate = price_1m if dur_clean == "1m" else price_3m
     total_ltc = round(rate * amount, 6)
+
+    # Apply discount if valid
+    discount_percent = get_discount_percent(discount_code) if discount_code else 0.0
+    if discount_percent > 0:
+        savings = round(total_ltc * (discount_percent / 100.0), 6)
+        total_ltc = round(total_ltc - savings, 6)
 
     target_address = ltc_address
     if not target_address or "PASTE" in target_address:
         return await ctx.send(embed=discord.Embed(
             title="❌ LTC Address Not Configured",
-            description="The bot owner has not set a Litecoin receiving address in `config/config.yaml`.",
+            description=f"The bot owner has not linked an LTC address yet. Use `{prefix}setwallet <address>` to set it.",
             color=0xFF0000
         ))
 
-    invoice = create_invoice(ctx.author.id, dur_clean, amount, total_ltc, target_address)
+    invoice = create_invoice(ctx.author.id, dur_clean, amount, total_ltc, target_address, target_invite, discount_code)
 
     embed = discord.Embed(
-        title="⚡ Litecoin Payment Invoice",
-        description=f"Send exact amount to the address below. Your boost credits will be credited automatically upon payment confirmation.",
+        title="⚡ Instant Delivery Litecoin Invoice",
+        description=f"Send exact amount to the address below. Your order will be confirmed and delivered automatically upon blockchain confirmation.",
         color=0xFEE75C
     )
     embed.add_field(name="📦 Order ID", value=f"`{invoice['id']}`", inline=True)
-    embed.add_field(name="💎 Product", value=f"`{amount}x {dur_clean}` Boost Credits", inline=True)
-    embed.add_field(name="💰 Amount to Send", value=f"**`{total_ltc} LTC`**", inline=False)
+    embed.add_field(name="💎 Product", value=f"`{amount}x {dur_clean}` Boosts", inline=True)
+    embed.add_field(name="💰 Amount to Send", value=f"**`{total_ltc} LTC`**" + (f" *({int(discount_percent)}% off applied)*" if discount_percent else ""), inline=False)
     embed.add_field(name="📬 Send To Address", value=f"```{target_address}```", inline=False)
+
+    if target_invite:
+        embed.add_field(name="⚡ Auto-Delivery Target", value=f"`.gg/{getinviteCode(target_invite)}` (Will boost instantly once paid)", inline=False)
+
     embed.add_field(name="⏳ Status", value="`Awaiting Payment (Expires in 60 mins)`", inline=False)
-    embed.set_footer(text="Click 'Check Payment' once you have sent the transaction")
+    embed.set_footer(text="Click 'Check Payment' once sent to check blockchain immediately")
 
     view = PaymentView(invoice['id'], target_address, total_ltc)
     msg = await ctx.send(embed=embed, view=view)
 
-    # Start automated background polling task
     asyncio.create_task(auto_poll_invoice(invoice['id'], msg, ctx.channel, ctx.author.id))
+
+# ==========================================
+# Redeem Code Command
+# ==========================================
+
+@bot.command(name="redeem")
+async def cmd_redeem(ctx: commands.Context, key_code: str = None):
+    """
+    Redeem an instant delivery boost key code.
+    Usage:
+      $redeem BOOST-1M-2X-ABCD-1234
+    """
+    if not key_code:
+        return await ctx.send(embed=discord.Embed(
+            title="🔑 Redeem Boost Code",
+            description=f"Enter your boost key to claim your credits:\n`{prefix}redeem <KEY-CODE>`\n\nExample: `{prefix}redeem BOOST-1M-2X-ABCD-1234`",
+            color=0x5865F2
+        ))
+
+    success, msg, item = redeem_boost_key(key_code, ctx.author.id)
+    color = 0x57F287 if success else 0xFF0000
+
+    embed = discord.Embed(title="Code Redemption", description=msg, color=color)
+    if success and item:
+        bal = get_user_balance(ctx.author.id)
+        embed.add_field(name="Updated Balance", value=f"• 1-Month: `{bal['1m']}` boosts\n• 3-Month: `{bal['3m']}` boosts", inline=False)
+        embed.set_footer(text=f"Use {prefix}boost <invite> {item['amount']} {item['duration'].replace('m', '')} to apply your boosts!")
+
+    await ctx.send(embed=embed)
+
+# ==========================================
+# Live Wallet Inspector & Wallet Linking
+# ==========================================
+
+@bot.command(name="wallet")
+async def cmd_wallet(ctx: commands.Context):
+    """Inspect linked LTC wallet live on the blockchain."""
+    global ltc_address
+    if not ltc_address or "PASTE" in ltc_address:
+        return await ctx.send(embed=discord.Embed(
+            title="🪙 No Wallet Linked",
+            description=f"No Litecoin wallet has been configured yet.\nOwners can link a wallet anytime using: `{prefix}setwallet <address>`",
+            color=0xFF0000
+        ))
+
+    status_msg = await ctx.send("🔍 Fetching live blockchain data for your wallet...")
+    info = await asyncio.to_thread(get_wallet_live_info, ltc_address)
+
+    embed = discord.Embed(title="🪙 Linked Litecoin Wallet (Live Blockchain)", color=0x5865F2)
+    embed.add_field(name="Address", value=f"```{ltc_address}```", inline=False)
+    embed.add_field(name="Current Balance", value=f"**`{info.get('balance_ltc', 0.0)} LTC`**", inline=True)
+    embed.add_field(name="Total Received", value=f"`{info.get('total_received_ltc', 0.0)} LTC`", inline=True)
+    embed.add_field(name="Transactions Count", value=f"`{info.get('tx_count', 0)}` txs", inline=True)
+    embed.add_field(name="🔗 Blockchain Explorer", value=f"[View on {info.get('provider', 'Blockchair')}]({info.get('explorer_url')})", inline=False)
+    embed.set_footer(text="Live data directly queried from Litecoin nodes")
+
+    await status_msg.edit(content=None, embed=embed)
+
+@bot.command(name="setwallet")
+async def cmd_setwallet(ctx: commands.Context, new_address: str = None):
+    """Link a new Litecoin receiving address (Owner Only)."""
+    global ltc_address
+    if not is_owner(ctx.author):
+        return await ctx.send(embed=discord.Embed(title="❌ Unauthorized", color=0xFF0000))
+
+    if not new_address or len(new_address.strip()) < 20:
+        return await ctx.send(f"❌ Usage: `{prefix}setwallet <valid_ltc_address>`")
+
+    clean_addy = new_address.strip()
+    ltc_address = clean_addy
+
+    cfg = load_config()
+    if "ltc" not in cfg:
+        cfg["ltc"] = {}
+    cfg["ltc"]["address"] = clean_addy
+    save_config(cfg)
+
+    embed = discord.Embed(
+        title="✅ LTC Wallet Linked Successfully",
+        description=f"New Litecoin receiving address has been saved and is now active for all incoming `$buy` payments:\n```{clean_addy}```",
+        color=0x57F287
+    )
+    await ctx.send(embed=embed)
+
+# ==========================================
+# Dynamic Pricing & Discounts
+# ==========================================
+
+@bot.command(name="setprice")
+async def cmd_setprice(ctx: commands.Context, duration: str = None, new_price: float = None):
+    """Set the price per boost in LTC (Owner Only)."""
+    global price_1m, price_3m
+    if not is_owner(ctx.author):
+        return await ctx.send(embed=discord.Embed(title="❌ Unauthorized", color=0xFF0000))
+
+    if duration not in ["1m", "3m"] or not new_price or new_price <= 0:
+        return await ctx.send(f"❌ Usage: `{prefix}setprice <1m|3m> <price_in_ltc>`\nExample: `{prefix}setprice 1m 0.20`")
+
+    cfg = load_config()
+    if "ltc" not in cfg:
+        cfg["ltc"] = {}
+
+    if duration == "1m":
+        price_1m = round(float(new_price), 6)
+        cfg["ltc"]["price_per_boost_1m"] = price_1m
+    else:
+        price_3m = round(float(new_price), 6)
+        cfg["ltc"]["price_per_boost_3m"] = price_3m
+
+    save_config(cfg)
+    await ctx.send(f"✅ Price for **{duration}** boosts updated to **`{new_price} LTC`** per boost!")
+
+@bot.command(name="creatediscount")
+async def cmd_creatediscount(ctx: commands.Context, code: str = None, percent: float = None):
+    """Create a promotional discount code (Owner Only)."""
+    if not is_owner(ctx.author):
+        return await ctx.send(embed=discord.Embed(title="❌ Unauthorized", color=0xFF0000))
+
+    if not code or not percent or percent <= 0 or percent >= 100:
+        return await ctx.send(f"❌ Usage: `{prefix}creatediscount <CODE> <percent_off>`\nExample: `{prefix}creatediscount SUMMER10 10`")
+
+    create_discount(code, percent)
+    await ctx.send(f"✅ Discount code **`{code.upper()}`** created for **{percent}% off**! Users can use it with `{prefix}buy 1m 2 code:{code.upper()}`.")
+
+# ==========================================
+# Gift Code Generator (Owner Only)
+# ==========================================
+
+@bot.command(name="createcode", aliases=["genkey"])
+async def cmd_createcode(ctx: commands.Context, duration: str = None, amount: int = None):
+    """Generate a free redeemable gift code (Owner Only)."""
+    if not is_owner(ctx.author):
+        return await ctx.send(embed=discord.Embed(title="❌ Unauthorized", color=0xFF0000))
+
+    if duration not in ["1m", "3m"] or not amount or amount <= 0:
+        return await ctx.send(f"❌ Usage: `{prefix}createcode <1m|3m> <amount>`\nExample: `{prefix}createcode 1m 2`")
+
+    key_str = generate_boost_key(duration, amount, created_by=f"owner_{ctx.author.id}")
+    embed = discord.Embed(
+        title="🎁 Gift Boost Code Generated",
+        description=f"**Code**: `{key_str}`\n**Product**: `{amount}x {duration}` Boosts\n\nGive this code to any user to redeem with `{prefix}redeem {key_str}`.",
+        color=0x57F287
+    )
+    await ctx.send(embed=embed)
+
+# ==========================================
+# Sales Statistics Dashboard
+# ==========================================
+
+@bot.command(name="stats")
+async def cmd_stats(ctx: commands.Context):
+    """View shop sales statistics and revenue."""
+    stats = get_sales_stats()
+    tokens_1m = len(getStock("data/1m.txt") or [])
+    tokens_3m = len(getStock("data/3m.txt") or [])
+
+    embed = discord.Embed(title="📊 Booster Shop Statistics", color=0x5865F2)
+    embed.add_field(name="💰 Total Revenue", value=f"`{stats['total_revenue_ltc']} LTC`", inline=True)
+    embed.add_field(name="📦 Total Boosts Sold", value=f"`{stats['total_boosts_sold']}` boosts", inline=True)
+    embed.add_field(name="✅ Completed Orders", value=f"`{stats['completed_orders']}` orders", inline=True)
+    embed.add_field(name="⏳ Pending Orders", value=f"`{stats['pending_orders']}` orders", inline=True)
+    embed.add_field(name="🔑 Keys Generated / Redeemed", value=f"`{stats['total_keys_generated']}` / `{stats['total_keys_redeemed']}`", inline=True)
+    embed.add_field(name="📦 Current Available Stock", value=f"• 1m: `{tokens_1m}` tokens (`{tokens_1m*2}` boosts)\n• 3m: `{tokens_3m}` tokens (`{tokens_3m*2}` boosts)", inline=False)
+    await ctx.send(embed=embed)
 
 # ==========================================
 # Balance & Credits Commands
@@ -401,7 +622,6 @@ async def cmd_restock(ctx: commands.Context, duration: str = None, *, token_data
 
     tokens_to_add = []
 
-    # 1. Check for attached file (Bulk upload of 100s or 1000s of tokens)
     if ctx.message.attachments:
         for attachment in ctx.message.attachments:
             if attachment.filename.endswith(".txt"):
@@ -409,7 +629,6 @@ async def cmd_restock(ctx: commands.Context, duration: str = None, *, token_data
                 lines = content.decode("utf-8", errors="ignore").splitlines()
                 tokens_to_add.extend([l.strip() for l in lines if l.strip()])
 
-    # 2. Check for pasted text
     if token_data:
         for l in token_data.strip().splitlines():
             if l.strip():
@@ -422,7 +641,6 @@ async def cmd_restock(ctx: commands.Context, duration: str = None, *, token_data
             color=0xFF0000
         ))
 
-    # Existing stock to avoid duplicates
     existing_stock = set(getStock(filename) or [])
     new_tokens = []
     for t in tokens_to_add:
@@ -431,12 +649,10 @@ async def cmd_restock(ctx: commands.Context, duration: str = None, *, token_data
             new_tokens.append(t)
             existing_stock.add(actual_t)
 
-    # Append new tokens to stock
     with open(filename, "a", encoding="utf-8") as f:
         for t in new_tokens:
             f.write(t + "\n")
 
-    # Delete command message for privacy
     try:
         await ctx.message.delete()
     except Exception:
@@ -519,9 +735,12 @@ async def cmd_confirmorder(ctx: commands.Context, invoice_id: str):
     if not is_owner(ctx.author):
         return await ctx.send(embed=discord.Embed(title="❌ Unauthorized", color=0xFF0000))
 
-    success, msg = force_complete_invoice(invoice_id.strip())
+    success, msg, inv = force_complete_invoice(invoice_id.strip())
     color = 0x57F287 if success else 0xFF0000
-    await ctx.send(embed=discord.Embed(title="Order Update", description=msg, color=color))
+    embed = discord.Embed(title="Order Update", description=msg, color=color)
+    if success and inv and inv.get("redeem_key"):
+        embed.add_field(name="Redeem Code Generated", value=f"`{inv['redeem_key']}`", inline=False)
+    await ctx.send(embed=embed)
 
 # ==========================================
 # Help Command
@@ -530,14 +749,16 @@ async def cmd_confirmorder(ctx: commands.Context, invoice_id: str):
 @bot.command(name="help")
 async def cmd_help(ctx: commands.Context):
     """Show comprehensive help menu."""
-    embed = discord.Embed(title="🤖 Booster & Auto-Shop Bot Commands", color=0x5865F2)
+    embed = discord.Embed(title="🤖 Instant Delivery Booster & Shop Bot", color=0x5865F2)
 
     embed.add_field(
-        name="🛒 Purchasing Boosts",
+        name="🛒 Purchasing & Redeeming",
         value=(
-            f"`{prefix}buy <1m|3m> <boosts>` — Auto-buy boost credits with Litecoin\n"
+            f"`{prefix}buy <1m|3m> <boosts> [invite]` — Auto-buy with LTC (instant boost or code)\n"
+            f"`{prefix}redeem <code>` — Redeem a boost key code\n"
             f"`{prefix}balance` — Check your available boost credits\n"
-            f"`{prefix}stock` — View available Nitro token stock"
+            f"`{prefix}stock` — View available Nitro token stock\n"
+            f"`{prefix}stats` — View total shop sales & revenue"
         ),
         inline=False
     )
@@ -553,8 +774,13 @@ async def cmd_help(ctx: commands.Context):
 
     if is_owner(ctx.author):
         embed.add_field(
-            name="👑 Owner Administration",
+            name="👑 Owner & Wallet Administration",
             value=(
+                f"`{prefix}wallet` — Live blockchain inspect of linked LTC wallet\n"
+                f"`{prefix}setwallet <address>` — Link a new LTC wallet address\n"
+                f"`{prefix}setprice <1m|3m> <ltc>` — Change prices on the fly\n"
+                f"`{prefix}creatediscount <code> <%>` — Create a discount code\n"
+                f"`{prefix}createcode <1m|3m> <amt>` — Generate free redeemable gift codes\n"
                 f"`{prefix}restock <1m|3m>` — Bulk restock tokens (paste or attach `.txt`)\n"
                 f"`{prefix}addcredits @user <1m|3m> <amt>` — Gift credits manually\n"
                 f"`{prefix}removecredits @user <1m|3m> <amt>` — Deduct credits\n"
@@ -582,10 +808,8 @@ def main():
             input(" Press Enter to exit...")
         sys.exit(1)
 
-    # Start 24/7 web server for Render health checks and uptime pingers
     keep_alive()
 
-    # Load initial tokens from environment variables if present (useful on Render)
     for env_key, filepath in [("TOKENS_1M", "data/1m.txt"), ("TOKENS_3M", "data/3m.txt")]:
         tokens_raw = os.environ.get(env_key, "").strip()
         if tokens_raw:

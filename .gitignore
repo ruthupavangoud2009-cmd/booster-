@@ -27,6 +27,7 @@ data/used_1m.txt
 data/used_3m.txt
 data/balances.json
 data/invoices.json
+data/discounts.json
 
 
 # Virtual environments & IDEs
