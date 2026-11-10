@@ -276,6 +276,11 @@ def create_invoice(
     save_json(INVOICES_FILE, invoices)
     return invoice
 
+def get_invoice(invoice_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves an invoice by its unique ID."""
+    invoices = load_json(INVOICES_FILE, {})
+    return invoices.get(invoice_id)
+
 # ==========================================
 # Multi-Crypto & Wallet Management
 # ==========================================

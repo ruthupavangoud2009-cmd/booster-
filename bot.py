@@ -108,10 +108,43 @@ def get_rate_for_crypto(crypto: str, duration: str) -> float:
         return float(cfg_rates[c])
     return DEFAULT_CRYPTO_RATES.get(c, {}).get(duration, 0.25)
 
+BOT_START_TIME = time.time()
+
+def get_uptime_str() -> str:
+    seconds = int(time.time() - BOT_START_TIME)
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts) if parts else "0s"
+
+NO_PREFIX_COMMANDS = {
+    "ping", "help", "shop", "shoppanel", "panel", "buy", "stock", "boost",
+    "balance", "bal", "credits", "wallet", "wallets", "redeem", "ticket", "tickets",
+    "uptime", "stats", "botinfo", "serverinfo", "userinfo", "whoami", "avatar", "av", "pfp",
+    "clear", "purge"
+}
+
+def determine_prefix(bot_instance, message):
+    if not message.content:
+        return [prefix]
+    content = message.content.strip().lower()
+    first_word = content.split()[0] if content.split() else ""
+    if first_word in NO_PREFIX_COMMANDS:
+        return ["", prefix]
+    return [prefix]
+
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix=prefix, intents=intents, help_command=None)
+bot = commands.Bot(command_prefix=determine_prefix, intents=intents, help_command=None)
 
 # ==========================================
 # Core Boosting Helper (No Limitations)
@@ -1312,22 +1345,143 @@ async def cmd_cancelorder(ctx: commands.Context, invoice_id: str = None):
     color = AIZEN_ACCENT if success else discord.Color.red()
     await ctx.send(embed=discord.Embed(title="Order Cancellation", description=msg, color=color))
 
+# ==========================================
+# Essential Utility & Info Commands
+# ==========================================
+
 @bot.command(name="ping")
 @commands.cooldown(1, 3, commands.BucketType.user)
 async def cmd_ping(ctx: commands.Context):
-    """Check bot responsiveness and gateway latency."""
+    """Check bot responsiveness, API latency, and uptime."""
     start_time = time.time()
-    msg = await ctx.send("🏓 Pinging...")
+    msg = await ctx.send("🏓 Measuring Kyōka Suigetsu response times...")
     end_time = time.time()
 
     api_latency = round((end_time - start_time) * 1000)
     ws_latency = round(bot.latency * 1000)
 
-    embed = discord.Embed(title="🏓 Pong!", color=AIZEN_ACCENT)
-    embed.add_field(name="Gateway Latency", value=f"`{ws_latency}ms`", inline=True)
-    embed.add_field(name="API Latency", value=f"`{api_latency}ms`", inline=True)
-    embed.add_field(name="Security Status", value="`Hardened & Active`", inline=True)
+    embed = discord.Embed(
+        title="🏓 Pong! — Sōsuke Aizen System Status",
+        description="*\"No one stands on the heavens from the beginning.\"*",
+        color=AIZEN_ACCENT
+    )
+    embed.add_field(name="⚡ Gateway Latency", value=f"`{ws_latency}ms`", inline=True)
+    embed.add_field(name="🌐 API Roundtrip", value=f"`{api_latency}ms`", inline=True)
+    embed.add_field(name="⏱️ System Uptime", value=f"`{get_uptime_str()}`", inline=True)
+    embed.add_field(name="☁️ Hosting Platform", value="`Render Cloud Web Service`", inline=True)
+    embed.add_field(name="🛡️ Security Level", value="`Hardened & Active`", inline=True)
+    embed.add_field(name="✨ Prefix Mode", value=f"`{prefix}` or `no-prefix for shortcuts`", inline=True)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
     await msg.edit(content=None, embed=embed)
+
+@bot.command(name="uptime")
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_uptime(ctx: commands.Context):
+    """Check how long the bot has been running continuously."""
+    embed = discord.Embed(
+        title="⏱️ Continuous Uptime Monitor",
+        description=(
+            f"*\"Since when were you under the impression...\"*\n\n"
+            f"◈ **Online Duration**: `{get_uptime_str()}`\n"
+            f"◈ **24/7 Keep-Alive**: `Running on Render Cloud (/healthz)`\n"
+            f"◈ **Connected Servers**: `{len(bot.guilds)}`"
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="serverinfo", aliases=["guildinfo", "server"])
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_serverinfo(ctx: commands.Context):
+    """Inspect current server statistics, boost tier, and members."""
+    if not ctx.guild:
+        return await ctx.send("❌ This command must be used within a server.")
+    g = ctx.guild
+    embed = discord.Embed(
+        title=f"🏰 {g.name} — Server Overview",
+        description=f"Server ID: `{g.id}`\nOwner: <@{g.owner_id}>",
+        color=AIZEN_COLOR
+    )
+    if g.icon:
+        embed.set_thumbnail(url=g.icon.url)
+    embed.add_field(name="👥 Members", value=f"`{g.member_count}` total", inline=True)
+    embed.add_field(name="🚀 Boost Level", value=f"Level `{g.premium_tier}` ({g.premium_subscription_count} boosts)", inline=True)
+    embed.add_field(name="📜 Channels", value=f"`{len(g.channels)}` channels", inline=True)
+    embed.add_field(name="🎭 Roles", value=f"`{len(g.roles)}` roles", inline=True)
+    embed.add_field(name="📅 Created At", value=f"`{g.created_at.strftime('%Y-%m-%d')}`", inline=True)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="userinfo", aliases=["whoami", "user"])
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_userinfo(ctx: commands.Context, target: Optional[discord.Member] = None):
+    """Inspect user profile and available boost credit balance."""
+    u = target or ctx.author
+    bal = get_user_balance(u.id)
+    embed = discord.Embed(
+        title=f"👤 {u.name} — User Profile",
+        color=AIZEN_COLOR
+    )
+    embed.set_thumbnail(url=u.display_avatar.url)
+    embed.add_field(name="Identity", value=f"Name: `{u.name}`\nID: `{u.id}`\nMention: {u.mention}", inline=True)
+    embed.add_field(name="💳 Boost Credits", value=f"• 1-Month: `{bal['1m']}`\n• 3-Month: `{bal['3m']}`", inline=True)
+    embed.add_field(name="📅 Account Created", value=f"`{u.created_at.strftime('%Y-%m-%d')}`", inline=False)
+    if hasattr(u, "joined_at") and u.joined_at:
+        embed.add_field(name="📥 Server Joined", value=f"`{u.joined_at.strftime('%Y-%m-%d')}`", inline=True)
+    if is_owner(u):
+        embed.add_field(name="👑 Authorization", value="`👑 Throne Owner (Unlimited Access)`", inline=False)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="botinfo", aliases=["about", "info"])
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_botinfo(ctx: commands.Context):
+    """Display bot engine specifications and live stats."""
+    t1m = len(getStock("data/1m.txt") or [])
+    t3m = len(getStock("data/3m.txt") or [])
+    embed = discord.Embed(
+        title="⚔️ SŌSUKE AIZEN | THE THRONE ENGINE",
+        description=(
+            f"*\"No one stands on the heavens from the beginning. Neither you, nor I, not even God.\"*\n\n"
+            f"◈ **Engine**: `Kyōka Suigetsu v3.0`\n"
+            f"◈ **Uptime**: `{get_uptime_str()}`\n"
+            f"◈ **Web Latency**: `{round(bot.latency * 1000)}ms`\n"
+            f"◈ **Active Servers**: `{len(bot.guilds)}`\n"
+            f"◈ **Available Stock**: `{t1m * 2}` 1m Boosts | `{t3m * 2}` 3m Boosts\n"
+            f"◈ **Render Keep-Alive**: `Active (24/7 Web Service)`\n"
+            f"◈ **Owners**: `{', '.join(str(o) for o in HARDCODED_OWNERS)}`"
+        ),
+        color=AIZEN_COLOR
+    )
+    if bot.user.avatar:
+        embed.set_thumbnail(url=bot.user.avatar.url)
+    embed.set_footer(text="Automated Multi-Crypto Boosting & Shop Bot")
+    await ctx.send(embed=embed)
+
+@bot.command(name="avatar", aliases=["av", "pfp"])
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_avatar(ctx: commands.Context, target: Optional[discord.Member] = None):
+    """View high-resolution avatar image."""
+    u = target or ctx.author
+    embed = discord.Embed(title=f"🖼️ {u.name}'s Avatar", color=AIZEN_COLOR)
+    embed.set_image(url=u.display_avatar.url)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="clear", aliases=["purge"])
+@commands.has_permissions(manage_messages=True)
+async def cmd_clear(ctx: commands.Context, amount: int = 10):
+    """Purge recent channel messages (Manage Messages required)."""
+    if amount <= 0 or amount > 100:
+        return await ctx.send("❌ Please specify an amount between 1 and 100.")
+    deleted = await ctx.channel.purge(limit=amount + 1)
+    msg = await ctx.send(f"🧹 Cleaned `{len(deleted) - 1}` messages.")
+    await asyncio.sleep(3)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
 
 # ==========================================
 # Global Security & Rate-Limit Error Handler
@@ -1470,18 +1624,35 @@ def get_modular_help_embed(category: str, p: str) -> discord.Embed:
         embed.set_footer(text="Restricted to hardcoded bot owners [1505515188991033409, 1521774957065928734]")
         return embed
 
+    elif category == "utility":
+        embed = discord.Embed(
+            title="🛠️ Module: Essential Utility & Tools",
+            description="Basic bot commands, diagnostics, and server tools (usable with or without prefix!).",
+            color=AIZEN_COLOR
+        )
+        embed.add_field(name=f"🏓 `{p}ping` *(or just `ping`)*", value="View WebSocket latency, REST API roundtrip, and system uptime.", inline=False)
+        embed.add_field(name=f"⏱️ `{p}uptime` *(or just `uptime`)*", value="Check continuous 24/7 online duration on Render.", inline=False)
+        embed.add_field(name=f"🏰 `{p}serverinfo` *(or just `serverinfo`)*", value="Display server statistics, member counts, and Discord boost tier.", inline=False)
+        embed.add_field(name=f"👤 `{p}userinfo` *(or just `userinfo`, `whoami`)*", value="Inspect user account creation date, server join date, and boost balance.", inline=False)
+        embed.add_field(name=f"🤖 `{p}botinfo` *(or just `botinfo`)*", value="View bot engine statistics, version, active servers, and host details.", inline=False)
+        embed.add_field(name=f"🖼️ `{p}avatar` *(or just `avatar`)*", value="Display full-resolution avatar of yourself or a mentioned member.", inline=False)
+        embed.add_field(name=f"🧹 `{p}clear <1-100>` *(or just `clear`)*", value="Purge messages from the current channel (Manage Messages required).", inline=False)
+        embed.set_footer(text="✨ Tip: Whitelisted commands can be typed directly without '$'")
+        return embed
+
     else:
         # Minimalist Sleek Aizen Home Screen
         embed = discord.Embed(
             title="⚔️ ── SŌSUKE AIZEN | THE THRONE ── ⚔️",
             description=(
                 f"*\"No one stands on the heavens from the beginning.\"*\n\n"
-                f"> **Prefix**: `{p}`  •  **Status**: `Online 24/7`  •  **Security**: `Active`\n\n"
+                f"> **Prefix**: `{p}` *(or no-prefix for shortcuts)*  •  **Status**: `Online 24/7`\n\n"
                 f"Select a category from the dropdown menu below to view commands:\n\n"
                 f"• 🛒 **Auto-Shop**: Buy boosts with multi-crypto, redeem keys & credits\n"
                 f"• 🚀 **Server Boosting**: Direct boosting & interactive panel\n"
                 f"• 🪙 **Crypto & Wallets**: LTC, USDT, BTC, SOL live check & pricing\n"
                 f"• 🎫 **Tickets**: Advanced consultation tickets with topics\n"
+                f"• 🛠️ **Utility & Info**: Ping, uptime, serverinfo, userinfo, avatar, clear\n"
                 f"• 👑 **Owner Admin**: Restock, gift codes, discounts & users"
             ),
             color=AIZEN_COLOR
@@ -1498,6 +1669,7 @@ class HelpDropdown(Select):
             discord.SelectOption(label="Server Boosting", value="boost", emoji="🚀", description="Commands for boosting Discord servers"),
             discord.SelectOption(label="Crypto & Wallets", value="wallet", emoji="🪙", description="Multi-crypto wallet inspection & pricing"),
             discord.SelectOption(label="Tickets & Support", value="tickets", emoji="🎫", description="Consultation tickets with topic selection"),
+            discord.SelectOption(label="Utility & Tools", value="utility", emoji="🛠️", description="Ping, uptime, serverinfo, userinfo, avatar, clear"),
             discord.SelectOption(label="Owner Administration", value="admin", emoji="👑", description="Bulk restock, gift codes, discounts & users")
         ]
         super().__init__(placeholder="📂 Select a module to explore...", min_values=1, max_values=1, options=options)
@@ -1525,15 +1697,10 @@ async def cmd_help(ctx: commands.Context):
 # ==========================================
 
 def main():
-    if not bot_token:
-        print("\n [!] ERROR: No bot token found!")
-        print(" [!] Please set BOT_TOKEN environment variable or set 'bot_token' in config/config.yaml.")
-        print(" [!] Example: bot_token: \"MTI...\"\n")
-        if not os.environ.get("RENDER"):
-            input(" Press Enter to exit...")
-        sys.exit(1)
-
+    # 1. Start Render 24/7 Keep-Alive Web Service first so /healthz always responds
     keep_alive()
+
+    global bot_token
 
     for env_key, filepath in [("TOKENS_1M", "data/1m.txt"), ("TOKENS_3M", "data/3m.txt")]:
         tokens_raw = os.environ.get(env_key, "").strip()
@@ -1545,8 +1712,24 @@ def main():
                         f.write(line.strip() + "\n")
             print(f" [+] Loaded tokens from {env_key} into {filepath}")
 
+    if not bot_token:
+        print("=" * 60)
+        print(" [!] WARNING: BOT_TOKEN is not set yet!")
+        print(" [!] Keep-alive web server is ACTIVE on /healthz for Render.")
+        print(" [!] Add BOT_TOKEN in your Render Environment Variables to connect.")
+        print("=" * 60)
+        while not bot_token:
+            time.sleep(10)
+            bot_token = os.environ.get("BOT_TOKEN") or load_config().get("discord", {}).get("bot_token", "")
+
     print(" [*] Connecting to Discord...")
-    bot.run(bot_token)
+    try:
+        bot.run(bot_token)
+    except Exception as e:
+        print(f" [!] Discord connection error: {e}")
+        # Keep web server alive so Render doesn't loop restart
+        while True:
+            time.sleep(60)
 
 if __name__ == "__main__":
     main()
