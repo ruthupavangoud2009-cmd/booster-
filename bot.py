@@ -486,9 +486,8 @@ async def generate_crypto_invoice(
     else:
         msg = await interaction.response.send_message(embed=embed, view=view)
 
-    # Start background poller if LTC
-    if c_clean == "ltc":
-        asyncio.create_task(auto_poll_invoice(invoice['id'], msg, interaction.channel, interaction.user.id))
+    # Start background poller for automatic on-chain payment detection
+    asyncio.create_task(auto_poll_invoice(invoice['id'], msg, interaction.channel, interaction.user.id))
 
 class CryptoSelect(Select):
     def __init__(self, duration: str, amount: int, invite: Optional[str] = None, discount: Optional[str] = None):
