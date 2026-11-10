@@ -4,6 +4,7 @@ import time
 import yaml
 import asyncio
 import discord
+from discord import app_commands
 from discord.ext import commands
 from discord.ui import View, Button, Modal, TextInput, Select
 from typing import Optional
@@ -2001,6 +2002,449 @@ async def cmd_help(ctx: commands.Context):
     embed = get_modular_help_embed("home", prefix)
     view = ModularHelpView(prefix)
     await ctx.send(embed=embed, view=view)
+
+# ==========================================
+# Discord Application Slash Commands Tree
+# ==========================================
+
+@bot.tree.command(name="shoppanel", description="Deploy the all-in-one visual Aizen Shop Panel")
+async def slash_shoppanel(interaction: discord.Interaction):
+    t1m = len(getStock("data/1m.txt") or [])
+    t3m = len(getStock("data/3m.txt") or [])
+    stats = await get_reviews_stats_db()
+
+    embed = discord.Embed(
+        title="⚔️ ── SŌSUKE AIZEN | THE THRONE ── ⚔️",
+        description=(
+            f"*\"No one stands on the heavens from the beginning. Neither you, nor I, not even God.\"*\n\n"
+            f"Welcome to the **Official Discord Server Boosting & Services Portal**.\n"
+            f"Instant automated delivery, multi-crypto payments, and 24/7 reliability.\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**💎 Available Products**:\n"
+            f"◈ **1-Month Boosts**: Level 1 (2x) • Level 2 (7x) • Level 3 (14x)\n"
+            f"◈ **3-Month Boosts**: Long-term boost packages\n\n"
+            f"**🪙 Supported Crypto**: `LTC` • `USDT` • `BTC` • `SOL`\n"
+            f"**📦 Live Stock**: `{t1m * 2}` 1m Boosts | `{t3m * 2}` 3m Boosts\n"
+            f"**⭐ Customer Rating**: `⭐ {stats['average_rating']} / 5.0` (`{stats['total_reviews']}` Verified Vouches)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Click a button below to begin your purchase or open a consultation ticket."
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine | 100% Automated")
+    view = ShopPanelView()
+    await interaction.response.send_message(embed=embed, view=view)
+
+@bot.tree.command(name="buy", description="Generate an automated multi-crypto invoice for server boosts")
+@app_commands.describe(
+    duration="Boost duration (1m or 3m)",
+    amount="Number of boosts (must be an even number: 2, 4, 14...)",
+    crypto="Cryptocurrency to pay with",
+    invite="Target Discord invite for instant delivery (optional)",
+    discount="Promotional discount code (optional)"
+)
+@app_commands.choices(
+    duration=[
+        app_commands.Choice(name="1 Month", value="1m"),
+        app_commands.Choice(name="3 Months", value="3m"),
+    ],
+    crypto=[
+        app_commands.Choice(name="Litecoin (LTC)", value="ltc"),
+        app_commands.Choice(name="Tether USDT (TRC20)", value="usdt"),
+        app_commands.Choice(name="Bitcoin (BTC)", value="btc"),
+        app_commands.Choice(name="Solana (SOL)", value="sol"),
+    ]
+)
+async def slash_buy(
+    interaction: discord.Interaction,
+    duration: app_commands.Choice[str],
+    amount: int,
+    crypto: app_commands.Choice[str],
+    invite: Optional[str] = None,
+    discount: Optional[str] = None
+):
+    if amount <= 0 or amount % 2 != 0:
+        return await interaction.response.send_message("❌ Amount must be an even positive number (2 boosts per token).", ephemeral=True)
+    await generate_crypto_invoice(interaction, duration.value, amount, crypto.value, invite, discount)
+
+@bot.tree.command(name="balance", description="Inspect your available Discord server boost credits")
+async def slash_balance(interaction: discord.Interaction):
+    bal = get_user_balance(interaction.user.id)
+    embed = discord.Embed(
+        title=f"💳 Balance Overview — {interaction.user.name}",
+        description=(
+            f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+            f"◈ **1-Month Boost Credits**: `{bal['1m']}` boosts\n"
+            f"◈ **3-Month Boost Credits**: `{bal['3m']}` boosts\n\n"
+            f"Use `/boost` to apply boosts to any server!"
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="stock", description="Inspect real-time Nitro token stock and pricing")
+async def slash_stock(interaction: discord.Interaction):
+    t1m = len(getStock("data/1m.txt") or [])
+    t3m = len(getStock("data/3m.txt") or [])
+    embed = discord.Embed(
+        title="📦 Real-Time Nitro Token Stock",
+        description=(
+            f"◈ **1-Month Tokens**: `{t1m}` tokens (`{t1m * 2}` boosts available)\n"
+            f"◈ **3-Month Tokens**: `{t3m}` tokens (`{t3m * 2}` boosts available)\n\n"
+            f"**Supported Payment Cryptos**:\n"
+            f"• 🪙 Litecoin (LTC) • 💵 Tether (USDT) • ₿ Bitcoin (BTC) • 🟣 Solana (SOL)"
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="redeem", description="Redeem an instant delivery boost code to claim credits")
+@app_commands.describe(code="The boost key to redeem (e.g. BOOST-1M-2X-ABCD-1234)")
+async def slash_redeem(interaction: discord.Interaction, code: str):
+    success, msg, key_obj = redeem_boost_key(code.strip(), interaction.user.id)
+    color = AIZEN_ACCENT if success else discord.Color.red()
+    embed = discord.Embed(
+        title="🔑 Key Redemption",
+        description=msg,
+        color=color
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="ticket", description="Open a private support or consultation ticket")
+async def slash_ticket(interaction: discord.Interaction):
+    view = TicketTopicLaunchView(bot, HARDCODED_OWNERS)
+    embed = discord.Embed(
+        title="⚔️ Consultation & Support Desk",
+        description="Select a topic below to establish a private channel with our staff.",
+        color=AIZEN_COLOR
+    )
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="vouch", description="Submit a verified customer review and vouch")
+async def slash_vouch(interaction: discord.Interaction):
+    await interaction.response.send_modal(CustomerReviewModal())
+
+@bot.tree.command(name="reviews", description="View overall satisfaction stats and customer vouches")
+async def slash_reviews(interaction: discord.Interaction):
+    stats = await get_reviews_stats_db()
+    recent = await get_recent_reviews_db(limit=5)
+
+    desc = (
+        f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+        f"◈ **Overall Satisfaction**: `⭐ {stats['average_rating']} / 5.0`\n"
+        f"◈ **Total Verified Vouches**: `{stats['total_reviews']}`\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"**Latest Customer Reviews**:\n"
+    )
+    if recent:
+        for r in recent:
+            stars = "⭐" * r.get("rating", 5)
+            desc += f"• **{r.get('user_name', 'Customer')}** ({stars}):\n  *{r.get('comment', 'Great service!')}*\n\n"
+    else:
+        desc += "*No reviews yet. Be the first to leave a review using `/vouch`!*\n"
+
+    embed = discord.Embed(
+        title="⭐ Sōsuke Aizen Customer Reviews & Vouches",
+        description=desc,
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine | 100% Automated")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="ping", description="Check bot latency, API roundtrip, and system health")
+async def slash_ping(interaction: discord.Interaction):
+    start_time = time.time()
+    await interaction.response.defer()
+    api_latency = round((time.time() - start_time) * 1000)
+    ws_latency = round(bot.latency * 1000)
+
+    embed = discord.Embed(
+        title="🏓 Pong! — Sōsuke Aizen System Status",
+        description="*\"No one stands on the heavens from the beginning.\"*",
+        color=AIZEN_ACCENT
+    )
+    embed.add_field(name="⚡ Gateway Latency", value=f"`{ws_latency}ms`", inline=True)
+    embed.add_field(name="🌐 API Roundtrip", value=f"`{api_latency}ms`", inline=True)
+    embed.add_field(name="⏱️ System Uptime", value=f"`{get_uptime_str()}`", inline=True)
+    embed.add_field(name="☁️ System Status", value="`Operational (24/7 Active)`", inline=True)
+    embed.add_field(name="🗄️ Database Engine", value="`Supabase PostgreSQL`" if is_db_connected() else "`Resilient Storage`", inline=True)
+    embed.add_field(name="🛡️ Security Level", value="`Hardened & Active`", inline=True)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="uptime", description="Check continuous 24/7 online duration")
+async def slash_uptime(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="⏱️ Continuous Uptime Monitor",
+        description=(
+            f"*\"Since when were you under the impression...\"*\n\n"
+            f"◈ **Online Duration**: `{get_uptime_str()}`\n"
+            f"◈ **24/7 High-Availability**: `Active & Operational`\n"
+            f"◈ **Connected Servers**: `{len(bot.guilds)}`"
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="serverinfo", description="Inspect current server statistics, boost tier, and members")
+async def slash_serverinfo(interaction: discord.Interaction):
+    if not interaction.guild:
+        return await interaction.response.send_message("❌ This command must be used within a server.", ephemeral=True)
+    g = interaction.guild
+    embed = discord.Embed(
+        title=f"🏰 {g.name} — Server Overview",
+        description=f"Server ID: `{g.id}`\nOwner: <@{g.owner_id}>",
+        color=AIZEN_COLOR
+    )
+    if g.icon:
+        embed.set_thumbnail(url=g.icon.url)
+    embed.add_field(name="👥 Members", value=f"`{g.member_count}` total", inline=True)
+    embed.add_field(name="🚀 Boost Level", value=f"Level `{g.premium_tier}` ({g.premium_subscription_count} boosts)", inline=True)
+    embed.add_field(name="📜 Channels", value=f"`{len(g.channels)}` channels", inline=True)
+    embed.add_field(name="🎭 Roles", value=f"`{len(g.roles)}` roles", inline=True)
+    embed.add_field(name="📅 Created At", value=f"`{g.created_at.strftime('%Y-%m-%d')}`", inline=True)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="userinfo", description="Inspect user profile and available boost credit balance")
+@app_commands.describe(user="The user to inspect (defaults to yourself)")
+async def slash_userinfo(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    u = user or interaction.user
+    bal = get_user_balance(u.id)
+    embed = discord.Embed(
+        title=f"👤 {u.name} — User Profile",
+        color=AIZEN_COLOR
+    )
+    embed.set_thumbnail(url=u.display_avatar.url)
+    embed.add_field(name="Identity", value=f"Name: `{u.name}`\nID: `{u.id}`\nMention: {u.mention}", inline=True)
+    embed.add_field(name="💳 Boost Credits", value=f"• 1-Month: `{bal['1m']}`\n• 3-Month: `{bal['3m']}`", inline=True)
+    embed.add_field(name="📅 Account Created", value=f"`{u.created_at.strftime('%Y-%m-%d')}`", inline=False)
+    if is_owner(u):
+        embed.add_field(name="👑 Authorization", value="`👑 Throne Owner (Unlimited Access)`", inline=False)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="botinfo", description="Display bot engine specifications and live stats")
+async def slash_botinfo(interaction: discord.Interaction):
+    t1m = len(getStock("data/1m.txt") or [])
+    t3m = len(getStock("data/3m.txt") or [])
+    embed = discord.Embed(
+        title="⚔️ SŌSUKE AIZEN | THE THRONE ENGINE",
+        description=(
+            f"*\"No one stands on the heavens from the beginning. Neither you, nor I, not even God.\"*\n\n"
+            f"◈ **Engine**: `Kyōka Suigetsu v3.0`\n"
+            f"◈ **Uptime**: `{get_uptime_str()}`\n"
+            f"◈ **Web Latency**: `{round(bot.latency * 1000)}ms`\n"
+            f"◈ **Active Servers**: `{len(bot.guilds)}`\n"
+            f"◈ **Available Stock**: `{t1m * 2}` 1m Boosts | `{t3m * 2}` 3m Boosts\n"
+            f"◈ **System Status**: `Operational (24/7 Active)`\n"
+            f"◈ **Database**: `{'Supabase PostgreSQL' if is_db_connected() else 'Resilient Storage'}`\n"
+            f"◈ **Owners**: `{', '.join(str(o) for o in HARDCODED_OWNERS)}`"
+        ),
+        color=AIZEN_COLOR
+    )
+    if bot.user.avatar:
+        embed.set_thumbnail(url=bot.user.avatar.url)
+    embed.set_footer(text="Automated Multi-Crypto Boosting & Shop Bot")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="avatar", description="View high-resolution avatar image of yourself or another member")
+@app_commands.describe(user="The member whose avatar to view")
+async def slash_avatar(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    u = user or interaction.user
+    embed = discord.Embed(title=f"🖼️ {u.name}'s Avatar", color=AIZEN_COLOR)
+    embed.set_image(url=u.display_avatar.url)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="clear", description="Purge recent channel messages (Manage Messages required)")
+@app_commands.describe(amount="Number of messages to purge (1-100)")
+async def slash_clear(interaction: discord.Interaction, amount: int = 10):
+    if not interaction.user.guild_permissions.manage_messages and not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Manage Messages permission required.", ephemeral=True)
+    if amount <= 0 or amount > 100:
+        return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(f"🧹 Cleaned `{len(deleted)}` messages.", ephemeral=True)
+
+@bot.tree.command(name="wallets", description="Inspect active cryptocurrency receiving wallet addresses")
+async def slash_wallets(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    wallets = [
+        ("🪙 Litecoin (LTC)", "ltc", get_address_for_crypto("ltc")),
+        ("💵 Tether (USDT TRC20)", "usdt", get_address_for_crypto("usdt")),
+        ("₿ Bitcoin (BTC)", "btc", get_address_for_crypto("btc")),
+        ("🟣 Solana (SOL)", "sol", get_address_for_crypto("sol"))
+    ]
+    embed = discord.Embed(
+        title="🪙 Sōsuke Aizen — Multi-Crypto Receiving Wallets",
+        description="Active addresses receiving automated payments:",
+        color=AIZEN_COLOR
+    )
+    for name, code, addr in wallets:
+        info = get_wallet_live_info(code, addr)
+        val = f"```{addr}```\n" + (f"• **Balance**: `{info.get('balance')}`\n" if info.get('balance') else "")
+        embed.add_field(name=name, value=val, inline=False)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="stats", description="View overall shop metrics, completed orders, and crypto volume")
+async def slash_stats(interaction: discord.Interaction):
+    stats = get_sales_stats()
+    embed = discord.Embed(
+        title="📊 Sōsuke Aizen — Commercial Analytics",
+        description="Automated shop order analytics:",
+        color=AIZEN_COLOR
+    )
+    embed.add_field(name="📦 Total Orders", value=f"`{stats['total_orders']}`", inline=True)
+    embed.add_field(name="✅ Paid Orders", value=f"`{stats['paid_orders']}`", inline=True)
+    embed.add_field(name="🚀 Boosts Delivered", value=f"`{stats['total_boosts_sold']}` boosts", inline=True)
+    c_rev = stats.get("crypto_revenue", {})
+    vol_lines = [f"• **{c.upper()}**: `{round(amt, 6)}`" for c, amt in c_rev.items() if amt > 0]
+    embed.add_field(name="💰 Crypto Volume", value="\n".join(vol_lines) if vol_lines else "`None yet`", inline=False)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="help", description="Open the interactive modular Aizen help menu")
+async def slash_help(interaction: discord.Interaction):
+    embed = get_modular_help_embed("home", prefix)
+    view = ModularHelpView(prefix)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="setreviewchannel", description="Set the channel where customer reviews are auto-posted (Admin only)")
+@app_commands.describe(channel="The channel for reviews and vouches")
+async def slash_setreviewchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not interaction.user.guild_permissions.administrator and not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+    await set_setting_db(f"guild_{interaction.guild.id}_review_channel", str(channel.id))
+    await set_setting_db("review_channel_id", str(channel.id))
+    embed = discord.Embed(
+        title="⭐ Review & Vouch Channel Configured",
+        description=f"✅ Customer reviews and vouches will now automatically post to {channel.mention}.",
+        color=AIZEN_ACCENT
+    )
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="addcredits", description="Manually add boost credits to a user (Owner Only)")
+@app_commands.describe(user="The user to credit", duration="1m or 3m", amount="Amount of boosts")
+@app_commands.choices(duration=[app_commands.Choice(name="1 Month", value="1m"), app_commands.Choice(name="3 Months", value="3m")])
+async def slash_addcredits(interaction: discord.Interaction, user: discord.Member, duration: app_commands.Choice[str], amount: int):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    new_bal = add_user_balance(user.id, duration.value, amount)
+    await interaction.response.send_message(f"✅ Added `{amount}`x {duration.value} boosts to {user.mention}. New Balance: `{new_bal[duration.value]}`", ephemeral=True)
+
+@bot.tree.command(name="removecredits", description="Manually remove boost credits from a user (Owner Only)")
+@app_commands.describe(user="The user to deduct from", duration="1m or 3m", amount="Amount of boosts")
+@app_commands.choices(duration=[app_commands.Choice(name="1 Month", value="1m"), app_commands.Choice(name="3 Months", value="3m")])
+async def slash_removecredits(interaction: discord.Interaction, user: discord.Member, duration: app_commands.Choice[str], amount: int):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    deduct_user_balance(user.id, duration.value, amount)
+    bal = get_user_balance(user.id)
+    await interaction.response.send_message(f"✅ Removed `{amount}`x {duration.value} boosts from {user.mention}. New Balance: `{bal[duration.value]}`", ephemeral=True)
+
+@bot.tree.command(name="createcode", description="Generate a redeemable boost gift code (Owner Only)")
+@app_commands.describe(duration="1m or 3m", amount="Amount of boosts")
+@app_commands.choices(duration=[app_commands.Choice(name="1 Month", value="1m"), app_commands.Choice(name="3 Months", value="3m")])
+async def slash_createcode(interaction: discord.Interaction, duration: app_commands.Choice[str], amount: int):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    key_str = generate_boost_key(duration.value, amount, f"owner:{interaction.user.id}")
+    await interaction.response.send_message(f"🎁 **Gift Key Created**: `{key_str}` (`{amount}x {duration.value}`)", ephemeral=True)
+
+@bot.tree.command(name="creatediscount", description="Create a promotional discount code (Owner Only)")
+@app_commands.describe(code="Promo code (e.g. SAVE10)", percent="Percentage discount (e.g. 10)")
+async def slash_creatediscount(interaction: discord.Interaction, code: str, percent: float):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    create_discount(code.strip().upper(), percent)
+    await interaction.response.send_message(f"🏷️ Discount code `{code.strip().upper()}` created for `{percent}%` off.", ephemeral=True)
+
+@bot.tree.command(name="confirmorder", description="Force-approve and deliver an invoice manually (Owner Only)")
+@app_commands.describe(invoice_id="The invoice ID to approve")
+async def slash_confirmorder(interaction: discord.Interaction, invoice_id: str):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    success, msg, inv = force_complete_invoice(invoice_id.strip())
+    await interaction.response.send_message(f"{'✅' if success else '❌'} {msg}", ephemeral=True)
+
+@bot.tree.command(name="cancelorder", description="Cancel a pending invoice")
+@app_commands.describe(invoice_id="The invoice ID to cancel")
+async def slash_cancelorder(interaction: discord.Interaction, invoice_id: str):
+    success, msg = cancel_invoice(invoice_id.strip(), interaction.user.id, is_owner(interaction.user))
+    await interaction.response.send_message(f"{'✅' if success else '❌'} {msg}", ephemeral=True)
+
+@bot.tree.command(name="ticketpanel", description="Deploy the permanent consultation ticket panel (Owner Only)")
+async def slash_ticketpanel(interaction: discord.Interaction):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    embed = discord.Embed(
+        title="🎫 ── AIZEN CONSULTATION & ASSISTANCE ── 🎫",
+        description=(
+            f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+            f"Need assistance, bulk boost packages, or custom payment options?\n"
+            f"Select a topic from the dropdown below to create a private ticket."
+        ),
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    view = TicketTopicLaunchView(bot, HARDCODED_OWNERS)
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("✅ Ticket panel deployed.", ephemeral=True)
+
+@bot.tree.command(name="usedtokens", description="View count of archived used tokens (Owner Only)")
+async def slash_usedtokens(interaction: discord.Interaction):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    count = 0
+    if os.path.exists(USED_TOKENS_FILE):
+        with open(USED_TOKENS_FILE, "r", encoding="utf-8") as f:
+            count = len([l for l in f.read().splitlines() if l.strip()])
+    await interaction.response.send_message(f"🗄️ Total tokens moved to archive: `{count}` tokens.", ephemeral=True)
+
+@bot.tree.command(name="setprice", description="Update crypto pricing for boost packages (Owner Only)")
+@app_commands.describe(duration="1m or 3m", coin="ltc, usdt, btc, or sol", price="New price per token")
+@app_commands.choices(
+    duration=[app_commands.Choice(name="1 Month", value="1m"), app_commands.Choice(name="3 Months", value="3m")],
+    coin=[
+        app_commands.Choice(name="LTC", value="ltc"),
+        app_commands.Choice(name="USDT", value="usdt"),
+        app_commands.Choice(name="BTC", value="btc"),
+        app_commands.Choice(name="SOL", value="sol"),
+    ]
+)
+async def slash_setprice(interaction: discord.Interaction, duration: app_commands.Choice[str], coin: app_commands.Choice[str], price: float):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    if price <= 0:
+        return await interaction.response.send_message("❌ Price must be positive.", ephemeral=True)
+    from payment import update_crypto_rate
+    update_crypto_rate(coin.value, duration.value, price)
+    await interaction.response.send_message(f"✅ Updated `{duration.value}` price for `{coin.name}` to `{price}` per token.", ephemeral=True)
+
+@bot.tree.command(name="setaddress", description="Update receiving crypto wallet address (Owner Only)")
+@app_commands.describe(coin="ltc, usdt, btc, or sol", address="Your crypto wallet address")
+@app_commands.choices(
+    coin=[
+        app_commands.Choice(name="LTC", value="ltc"),
+        app_commands.Choice(name="USDT (TRC20)", value="usdt"),
+        app_commands.Choice(name="BTC", value="btc"),
+        app_commands.Choice(name="SOL", value="sol"),
+    ]
+)
+async def slash_setaddress(interaction: discord.Interaction, coin: app_commands.Choice[str], address: str):
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Unauthorized.", ephemeral=True)
+    from payment import set_crypto_address
+    set_crypto_address(coin.value, address.strip())
+    await interaction.response.send_message(f"✅ Updated receiving address for `{coin.name}` to:\n```{address.strip()}```", ephemeral=True)
+
 
 # ==========================================
 # Main Startup
