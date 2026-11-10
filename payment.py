@@ -598,3 +598,108 @@ def get_sales_stats() -> Dict[str, Any]:
         "total_keys_generated": len(keys),
         "total_keys_redeemed": len([k for k in keys if k.get("status") == "used"])
     }
+
+# ==========================================
+# Order History, VIP Loyalty & Transfers
+# ==========================================
+
+def get_user_invoices(user_id: int) -> List[Dict[str, Any]]:
+    """Returns all invoices associated with a user, newest first."""
+    invoices = load_json(INVOICES_FILE, {})
+    user_invs = []
+    for inv in invoices.values():
+        if inv.get("user_id") == user_id:
+            user_invs.append(inv)
+    user_invs.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return user_invs
+
+def get_user_vip_tier(user_id: int) -> Dict[str, Any]:
+    """Computes customer VIP loyalty tier based on purchase history."""
+    invs = get_user_invoices(user_id)
+    paid_invs = [i for i in invs if i.get("status") == "completed"]
+    total_boosts = sum(i.get("boosts", 0) for i in paid_invs)
+    total_orders = len(paid_invs)
+
+    if total_boosts >= 100 or total_orders >= 10:
+        tier_name = "💎 Diamond Sovereign"
+        tier_perk = "10% Automatic VIP Savings & Instant Priority"
+        discount_pct = 10
+        next_tier = "Highest Rank Achieved!"
+        progress = 100
+    elif total_boosts >= 30 or total_orders >= 5:
+        tier_name = "🥇 Gold Booster"
+        tier_perk = "5% Automatic VIP Savings & Priority Queue"
+        discount_pct = 5
+        needed = 100 - total_boosts
+        next_tier = f"{needed} more boosts to 💎 Diamond"
+        progress = int((total_boosts / 100) * 100)
+    elif total_boosts >= 10 or total_orders >= 3:
+        tier_name = "🥈 Silver Booster"
+        tier_perk = "Priority Queue & Verified Buyer Card"
+        discount_pct = 2
+        needed = 30 - total_boosts
+        next_tier = f"{needed} more boosts to 🥇 Gold"
+        progress = int((total_boosts / 30) * 100)
+    elif total_orders >= 1 or total_boosts >= 2:
+        tier_name = "🥉 Bronze Booster"
+        tier_perk = "Verified Buyer Card & Vouch Eligibility"
+        discount_pct = 0
+        needed = 10 - total_boosts
+        next_tier = f"{needed} more boosts to 🥈 Silver"
+        progress = int((total_boosts / 10) * 100)
+    else:
+        tier_name = "🌱 Standard Customer"
+        tier_perk = "Complete your first order to unlock VIP rewards"
+        discount_pct = 0
+        next_tier = "Complete 1 order to reach 🥉 Bronze"
+        progress = 0
+
+    return {
+        "tier_name": tier_name,
+        "tier_perk": tier_perk,
+        "discount_pct": discount_pct,
+        "total_boosts": total_boosts,
+        "total_orders": total_orders,
+        "next_tier": next_tier,
+        "progress": min(100, max(0, progress))
+    }
+
+def transfer_user_balance(from_user_id: int, to_user_id: int, duration: str, amount: int) -> Tuple[bool, str]:
+    """Transfers boost credits between two users."""
+    if from_user_id == to_user_id:
+        return False, "❌ You cannot transfer boost credits to yourself."
+    if amount <= 0:
+        return False, "❌ Transfer amount must be greater than 0."
+    dur_clean = duration.lower().strip()
+    if dur_clean not in ["1m", "3m"]:
+        return False, "❌ Duration must be `1m` or `3m`."
+
+    bal = get_user_balance(from_user_id)
+    if bal.get(dur_clean, 0) < amount:
+        return False, f"❌ Insufficient balance. You only have `{bal.get(dur_clean, 0)}`x {dur_clean} credits."
+
+    deduct_user_balance(from_user_id, dur_clean, amount)
+    add_user_balance(to_user_id, dur_clean, amount)
+    return True, f"✅ Successfully transferred `{amount}`x {dur_clean} boost credits to <@{to_user_id}>!"
+
+def get_top_buyers(limit: int = 10) -> List[Dict[str, Any]]:
+    """Calculates top buyers leaderboard by completed boosts."""
+    invoices = load_json(INVOICES_FILE, {})
+    user_totals: Dict[int, Dict[str, Any]] = {}
+    for inv in invoices.values():
+        if inv.get("status") == "completed":
+            uid = inv.get("user_id")
+            if not uid:
+                continue
+            if uid not in user_totals:
+                user_totals[uid] = {"user_id": uid, "boosts": 0, "orders": 0}
+            user_totals[uid]["boosts"] += int(inv.get("boosts", 0))
+            user_totals[uid]["orders"] += 1
+
+    sorted_users = sorted(user_totals.values(), key=lambda x: x["boosts"], reverse=True)
+    return sorted_users[:limit]
+
+def list_active_discounts() -> Dict[str, float]:
+    """Returns currently available discount codes."""
+    return load_json(DISCOUNTS_FILE, {})
+

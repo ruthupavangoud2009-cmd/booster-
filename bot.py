@@ -33,7 +33,12 @@ from payment import (
     list_all_keys,
     CRYPTO_NAMES,
     DEFAULT_CRYPTO_RATES,
-    USED_TOKENS_FILE
+    USED_TOKENS_FILE,
+    get_user_invoices,
+    get_user_vip_tier,
+    transfer_user_balance,
+    get_top_buyers,
+    list_active_discounts
 )
 from database import (
     init_database,
@@ -139,7 +144,8 @@ NO_PREFIX_COMMANDS = {
     "ping", "help", "shop", "shoppanel", "panel", "buy", "stock", "boost",
     "balance", "bal", "credits", "wallet", "wallets", "redeem", "ticket", "tickets",
     "uptime", "stats", "botinfo", "serverinfo", "userinfo", "whoami", "avatar", "av", "pfp",
-    "clear", "purge", "vouch", "review", "reviews", "vouches", "setreviewchannel"
+    "clear", "purge", "vouch", "review", "reviews", "vouches", "setreviewchannel",
+    "orders", "myorders", "vip", "loyalty", "transfer", "sendcredits", "top", "leaderboard", "promos", "discounts", "setlogchannel"
 }
 
 def determine_prefix(bot_instance, message):
@@ -237,6 +243,96 @@ async def execute_boost(invite_str: str, amount: int, months: int, user_id: int,
         pass
 
 # ==========================================
+# Order Logging & Transfer Helpers
+# ==========================================
+
+async def log_completed_order(guild: Optional[discord.Guild], inv: dict):
+    """Posts a public verified receipt embed to the configured order log channel."""
+    if not guild or not inv:
+        return
+    channel_id = await get_setting_db(f"guild_{guild.id}_order_log_channel")
+    if not channel_id:
+        channel_id = await get_setting_db("order_log_channel_id")
+
+    log_channel = None
+    if channel_id:
+        try:
+            log_channel = guild.get_channel(int(channel_id))
+        except Exception:
+            log_channel = None
+
+    if not log_channel:
+        for ch in guild.text_channels:
+            if any(w in ch.name.lower() for w in ["order-log", "order-logs", "purchases", "receipts", "sales"]):
+                log_channel = ch
+                break
+
+    if not log_channel:
+        return
+
+    c_name = inv.get("crypto", "LTC").upper()
+    total_amt = inv.get("amount", inv.get("ltc_amount", 0.0))
+    user_id = inv.get("user_id")
+    order_id = inv.get("id")
+    boosts = inv.get("boosts", 0)
+    duration = str(inv.get("duration", "1m")).upper()
+
+    embed = discord.Embed(
+        title="🛒 Verified Purchase & Delivery Log",
+        description=(
+            f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+            f"◈ **Order ID**: `{order_id}`\n"
+            f"◈ **Customer**: <@{user_id}>\n"
+            f"◈ **Product**: `{boosts}x {duration}` Server Boosts\n"
+            f"◈ **Amount Paid**: `{total_amt} {c_name}`\n"
+            f"◈ **Status**: `PAID & DELIVERED` ✅\n"
+            f"◈ **Receipt Key**: `{inv.get('redeem_key', 'Generated')}`\n"
+        ),
+        color=AIZEN_ACCENT
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+    embed.timestamp = discord.utils.utcnow()
+
+    try:
+        await log_channel.send(embed=embed)
+    except Exception:
+        pass
+
+class TransferCreditsModal(Modal, title="🎁 Transfer Boost Credits"):
+    recipient_input = TextInput(
+        label="Recipient User ID",
+        placeholder="e.g. 1505515188991033409",
+        required=True,
+        max_length=25
+    )
+    duration_input = TextInput(
+        label="Duration (1m or 3m)",
+        placeholder="1m or 3m",
+        required=True,
+        max_length=2
+    )
+    amount_input = TextInput(
+        label="Amount of Boosts",
+        placeholder="Even number (e.g. 2, 4, 14)",
+        required=True,
+        max_length=4
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(self.recipient_input.value.strip().replace("<@", "").replace(">", "").replace("!", ""))
+            amount = int(self.amount_input.value.strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ Invalid user ID or amount number.", ephemeral=True)
+
+        duration = self.duration_input.value.strip().lower()
+        success, msg = transfer_user_balance(interaction.user.id, target_id, duration, amount)
+        color = AIZEN_ACCENT if success else discord.Color.red()
+        embed = discord.Embed(title="🎁 Boost Credit Transfer", description=msg, color=color)
+        embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ==========================================
 # Payment View with Interactive Buttons
 # ==========================================
 
@@ -297,6 +393,9 @@ class PaymentView(View):
             else:
                 boost_view = InTicketBoostPromptView()
                 await interaction.channel.send(content=f"<@{user_id}>", embed=celebrate_embed, view=boost_view)
+
+            if interaction.guild:
+                asyncio.create_task(log_completed_order(interaction.guild, inv))
 
             await interaction.followup.send(f"🎉 **Payment Verified!** Added `{inv['boosts']}`x `{inv['duration']}` credits.", ephemeral=True)
         else:
@@ -547,6 +646,9 @@ async def auto_poll_invoice(invoice_id: str, message: discord.Message, channel: 
                 else:
                     boost_view = InTicketBoostPromptView()
                     await channel.send(content=f"<@{user_id}>", embed=celebrate_embed, view=boost_view)
+
+                if hasattr(channel, "guild") and channel.guild:
+                    asyncio.create_task(log_completed_order(channel.guild, inv))
                 break
         except Exception:
             pass
@@ -945,6 +1047,63 @@ class ShopPanelView(View):
     async def btn_redeem(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(RedeemKeyModal())
 
+    @discord.ui.button(label="📜 My Orders", style=discord.ButtonStyle.secondary, custom_id="shop_btn_orders", row=2)
+    async def btn_orders(self, interaction: discord.Interaction, button: Button):
+        invs = get_user_invoices(interaction.user.id)
+        if not invs:
+            return await interaction.response.send_message("📦 You haven't placed any orders yet. Click **Buy Server Boosts** above to get started!", ephemeral=True)
+
+        embed = discord.Embed(
+            title=f"📜 Order History — {interaction.user.name}",
+            description="Your recent purchases and receipt keys:",
+            color=AIZEN_COLOR
+        )
+        for inv in invs[:5]:
+            ts = time.strftime('%Y-%m-%d %H:%M', time.gmtime(inv.get('created_at', time.time())))
+            status = str(inv.get('status', 'pending')).upper()
+            c_name = str(inv.get('crypto', 'LTC')).upper()
+            amt = inv.get('amount', inv.get('ltc_amount', 0.0))
+            code = inv.get('redeem_key') or "Pending Confirmation"
+            embed.add_field(
+                name=f"Order `{inv['id']}` • {ts} UTC",
+                value=(
+                    f"◈ **Product**: `{inv.get('boosts', 2)}x {inv.get('duration', '1m').upper()}`\n"
+                    f"◈ **Amount**: `{amt} {c_name}` • **Status**: `{status}`\n"
+                    f"◈ **Receipt Key**: `{code}`"
+                ),
+                inline=False
+            )
+        embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="💎 VIP Loyalty", style=discord.ButtonStyle.secondary, custom_id="shop_btn_vip", row=2)
+    async def btn_vip(self, interaction: discord.Interaction, button: Button):
+        vip = get_user_vip_tier(interaction.user.id)
+        bar_filled = int(vip['progress'] / 10)
+        bar_str = "█" * bar_filled + "░" * (10 - bar_filled)
+
+        embed = discord.Embed(
+            title=f"💎 VIP Loyalty Card — {interaction.user.name}",
+            description=(
+                f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+                f"◈ **Current Tier**: **{vip['tier_name']}**\n"
+                f"◈ **Active Perks**: `{vip['tier_perk']}`\n"
+                f"◈ **Total Boosts Purchased**: `{vip['total_boosts']}` boosts\n"
+                f"◈ **Completed Invoices**: `{vip['total_orders']}` orders\n\n"
+                f"**Tier Progression**:\n"
+                f"`[{bar_str}]` {vip['progress']}%\n"
+                f"*{vip['next_tier']}*"
+            ),
+            color=AIZEN_ACCENT
+        )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Loyalty Program")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🎁 Transfer Credits", style=discord.ButtonStyle.secondary, custom_id="shop_btn_transfer", row=2)
+    async def btn_transfer(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(TransferCreditsModal())
+
 # ==========================================
 # Bot Startup & Sync
 # ==========================================
@@ -1162,6 +1321,140 @@ async def cmd_reviews(ctx: commands.Context):
         color=AIZEN_COLOR
     )
     embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine | 100% Automated")
+    await ctx.send(embed=embed)
+
+# ==========================================
+# Advanced Shop Features: Logs, Orders, VIP & Transfers
+# ==========================================
+
+@bot.command(name="setlogchannel", aliases=["orderlogs", "setorderlogs"])
+@commands.has_permissions(administrator=True)
+async def cmd_setlogchannel(ctx: commands.Context, channel: discord.TextChannel = None):
+    """Set the dedicated channel where verified order receipts and delivery logs are auto-posted."""
+    target = channel or ctx.channel
+    await set_setting_db(f"guild_{ctx.guild.id}_order_log_channel", str(target.id))
+    await set_setting_db("order_log_channel_id", str(target.id))
+
+    embed = discord.Embed(
+        title="🛒 Order Log Channel Configured",
+        description=(
+            f"*\"No one stands on the heavens from the beginning.\"*\n\n"
+            f"✅ Verified order receipts will now automatically be logged to {target.mention}."
+        ),
+        color=AIZEN_ACCENT
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="orders", aliases=["myorders", "receipts"])
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_orders(ctx: commands.Context):
+    """View your personal purchase history and receipt keys."""
+    invs = get_user_invoices(ctx.author.id)
+    if not invs:
+        return await ctx.send(f"📦 You haven't placed any orders yet. Type `{prefix}buy` or `{prefix}shop` to purchase boosts!")
+
+    vip = get_user_vip_tier(ctx.author.id)
+    embed = discord.Embed(
+        title=f"📜 Order History — {ctx.author.name}",
+        description=f"**Loyalty Tier**: `{vip['tier_name']}` • **Total Boosts**: `{vip['total_boosts']}`\n\nRecent orders and receipt keys:",
+        color=AIZEN_COLOR
+    )
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    for inv in invs[:5]:
+        ts = time.strftime('%Y-%m-%d %H:%M', time.gmtime(inv.get('created_at', time.time())))
+        status = str(inv.get('status', 'pending')).upper()
+        c_name = str(inv.get('crypto', 'LTC')).upper()
+        amt = inv.get('amount', inv.get('ltc_amount', 0.0))
+        code = inv.get('redeem_key') or "Pending Confirmation"
+        embed.add_field(
+            name=f"Order `{inv['id']}` • {ts} UTC",
+            value=(
+                f"◈ **Product**: `{inv.get('boosts', 2)}x {str(inv.get('duration', '1m')).upper()}`\n"
+                f"◈ **Amount**: `{amt} {c_name}` • **Status**: `{status}`\n"
+                f"◈ **Receipt Key**: `{code}`"
+            ),
+            inline=False
+        )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="vip", aliases=["loyalty", "tier"])
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_vip(ctx: commands.Context, target: Optional[discord.Member] = None):
+    """View customer VIP loyalty tier, rewards, and discount status."""
+    u = target or ctx.author
+    vip = get_user_vip_tier(u.id)
+    bar_filled = int(vip['progress'] / 10)
+    bar_str = "█" * bar_filled + "░" * (10 - bar_filled)
+
+    embed = discord.Embed(
+        title=f"💎 VIP Loyalty Card — {u.name}",
+        description=(
+            f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+            f"◈ **Current Tier**: **{vip['tier_name']}**\n"
+            f"◈ **Active Perks**: `{vip['tier_perk']}`\n"
+            f"◈ **Total Boosts Purchased**: `{vip['total_boosts']}` boosts\n"
+            f"◈ **Completed Invoices**: `{vip['total_orders']}` orders\n\n"
+            f"**Tier Progression**:\n"
+            f"`[{bar_str}]` {vip['progress']}%\n"
+            f"*{vip['next_tier']}*"
+        ),
+        color=AIZEN_ACCENT
+    )
+    embed.set_thumbnail(url=u.display_avatar.url)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Loyalty Program")
+    await ctx.send(embed=embed)
+
+@bot.command(name="transfer", aliases=["sendcredits", "tip"])
+@commands.cooldown(1, 5, commands.BucketType.user)
+async def cmd_transfer(ctx: commands.Context, member: discord.Member, duration: str, amount: int):
+    """Transfer boost credits to another member."""
+    success, msg = transfer_user_balance(ctx.author.id, member.id, duration, amount)
+    color = AIZEN_ACCENT if success else discord.Color.red()
+    embed = discord.Embed(title="🎁 Boost Credit Transfer", description=msg, color=color)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="top", aliases=["leaderboard", "topbuyers"])
+@commands.cooldown(1, 5, commands.BucketType.user)
+async def cmd_top(ctx: commands.Context):
+    """View top buyers leaderboard by boost volume."""
+    top_list = get_top_buyers(10)
+    if not top_list:
+        return await ctx.send("📊 No purchase records found yet.")
+
+    desc = "*\"No one stands on the heavens from the beginning.\"*\n\n**Top Customer Leaderboard**:\n\n"
+    for idx, u in enumerate(top_list, 1):
+        medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"`#{idx}`"
+        desc += f"{medal} <@{u['user_id']}> — `{u['boosts']}` boosts (`{u['orders']}` orders)\n"
+
+    embed = discord.Embed(
+        title="🏆 Sōsuke Aizen — Top Customer Leaderboard",
+        description=desc,
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+    await ctx.send(embed=embed)
+
+@bot.command(name="promos", aliases=["discounts"])
+@commands.cooldown(1, 3, commands.BucketType.user)
+async def cmd_promos(ctx: commands.Context):
+    """View currently available promotional discount codes."""
+    discs = list_active_discounts()
+    if not discs:
+        return await ctx.send("🏷️ There are currently no active public promo codes. Stay tuned for server promotions!")
+
+    desc = "*Apply any code below during checkout for instant savings!*\n\n"
+    for code, pct in discs.items():
+        desc += f"• **`{code}`**: `{pct}%` OFF on all boost packages\n"
+
+    embed = discord.Embed(
+        title="🏷️ Active Promotional Discount Codes",
+        description=desc,
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text=f"Use in checkout: {prefix}buy 1m 2 ltc code:CODE")
     await ctx.send(embed=embed)
 
 # ==========================================
@@ -1858,9 +2151,15 @@ def get_modular_help_embed(category: str, p: str) -> discord.Embed:
         embed.add_field(name=f"💳 `{p}balance`", value="Displays your current available 1-Month and 3-Month boost credits.", inline=False)
         embed.add_field(name=f"📦 `{p}stock`", value="View the bot's real-time Nitro token stock and total boosts available.", inline=False)
         embed.add_field(name=f"📊 `{p}stats`", value="View total shop sales, revenue earned, and completed orders.", inline=False)
+        embed.add_field(name=f"📜 `{p}orders` *(or `{p}myorders`)*", value="View your personal purchase history and receipt keys.", inline=False)
+        embed.add_field(name=f"💎 `{p}vip` *(or `{p}loyalty`)*", value="Inspect customer VIP loyalty rank, perks, and savings tier.", inline=False)
+        embed.add_field(name=f"🎁 `{p}transfer @user <1m|3m> <amt>`", value="Transfer boost credits from your balance to a friend.", inline=False)
+        embed.add_field(name=f"🏆 `{p}top` *(or `{p}leaderboard`)*", value="View top customer leaderboard by boost volume.", inline=False)
+        embed.add_field(name=f"🏷️ `{p}promos` *(or `{p}discounts`)*", value="View active promotional discount codes.", inline=False)
         embed.add_field(name=f"⭐ `{p}vouch [1-5] [comment]` *(or `{p}review`)*", value="Leave a verified review/vouch for boost orders.", inline=False)
         embed.add_field(name=f"📜 `{p}reviews` *(or `{p}vouches`)*", value="View customer reviews and average satisfaction rating.", inline=False)
         embed.add_field(name=f"⚙️ `{p}setreviewchannel #channel` 👑", value="Configure channel for automatic customer review publishing.", inline=False)
+        embed.add_field(name=f"🛒 `{p}setlogchannel #channel` 👑", value="Configure channel for automated order delivery receipts.", inline=False)
         embed.set_footer(text="Use the dropdown menu below to navigate modules")
         return embed
 
@@ -2444,6 +2743,125 @@ async def slash_setaddress(interaction: discord.Interaction, coin: app_commands.
     from payment import set_crypto_address
     set_crypto_address(coin.value, address.strip())
     await interaction.response.send_message(f"✅ Updated receiving address for `{coin.name}` to:\n```{address.strip()}```", ephemeral=True)
+
+@bot.tree.command(name="orders", description="View your past purchase history and receipt keys")
+async def slash_orders(interaction: discord.Interaction):
+    invs = get_user_invoices(interaction.user.id)
+    if not invs:
+        return await interaction.response.send_message("📦 You haven't placed any orders yet. Use `/buy` to get started!", ephemeral=True)
+
+    vip = get_user_vip_tier(interaction.user.id)
+    embed = discord.Embed(
+        title=f"📜 Order History — {interaction.user.name}",
+        description=f"**Loyalty Tier**: `{vip['tier_name']}` • **Total Boosts**: `{vip['total_boosts']}`\n\nRecent orders and receipt keys:",
+        color=AIZEN_COLOR
+    )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    for inv in invs[:5]:
+        ts = time.strftime('%Y-%m-%d %H:%M', time.gmtime(inv.get('created_at', time.time())))
+        status = str(inv.get('status', 'pending')).upper()
+        c_name = str(inv.get('crypto', 'LTC')).upper()
+        amt = inv.get('amount', inv.get('ltc_amount', 0.0))
+        code = inv.get('redeem_key') or "Pending Confirmation"
+        embed.add_field(
+            name=f"Order `{inv['id']}` • {ts} UTC",
+            value=(
+                f"◈ **Product**: `{inv.get('boosts', 2)}x {str(inv.get('duration', '1m')).upper()}`\n"
+                f"◈ **Amount**: `{amt} {c_name}` • **Status**: `{status}`\n"
+                f"◈ **Receipt Key**: `{code}`"
+            ),
+            inline=False
+        )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="vip", description="Inspect VIP customer loyalty rank, perks, and discount tier")
+@app_commands.describe(user="The member whose loyalty tier to inspect (defaults to yourself)")
+async def slash_vip(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    u = user or interaction.user
+    vip = get_user_vip_tier(u.id)
+    bar_filled = int(vip['progress'] / 10)
+    bar_str = "█" * bar_filled + "░" * (10 - bar_filled)
+
+    embed = discord.Embed(
+        title=f"💎 VIP Loyalty Card — {u.name}",
+        description=(
+            f"*\"Admiration is the emotion furthest from understanding.\"*\n\n"
+            f"◈ **Current Tier**: **{vip['tier_name']}**\n"
+            f"◈ **Active Perks**: `{vip['tier_perk']}`\n"
+            f"◈ **Total Boosts Purchased**: `{vip['total_boosts']}` boosts\n"
+            f"◈ **Completed Invoices**: `{vip['total_orders']}` orders\n\n"
+            f"**Tier Progression**:\n"
+            f"`[{bar_str}]` {vip['progress']}%\n"
+            f"*{vip['next_tier']}*"
+        ),
+        color=AIZEN_ACCENT
+    )
+    embed.set_thumbnail(url=u.display_avatar.url)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Loyalty Program")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="transfer", description="Transfer boost credits to a friend")
+@app_commands.describe(user="The user to transfer credits to", duration="1m or 3m", amount="Amount of boosts to transfer")
+@app_commands.choices(duration=[app_commands.Choice(name="1 Month", value="1m"), app_commands.Choice(name="3 Months", value="3m")])
+async def slash_transfer(interaction: discord.Interaction, user: discord.Member, duration: app_commands.Choice[str], amount: int):
+    success, msg = transfer_user_balance(interaction.user.id, user.id, duration.value, amount)
+    color = AIZEN_ACCENT if success else discord.Color.red()
+    embed = discord.Embed(title="🎁 Boost Credit Transfer", description=msg, color=color)
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="leaderboard", description="View top buyers leaderboard by boost volume")
+async def slash_leaderboard(interaction: discord.Interaction):
+    top_list = get_top_buyers(10)
+    if not top_list:
+        return await interaction.response.send_message("📊 No purchase records found yet.", ephemeral=True)
+
+    desc = "*\"No one stands on the heavens from the beginning.\"*\n\n**Top Customer Leaderboard**:\n\n"
+    for idx, u in enumerate(top_list, 1):
+        medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"`#{idx}`"
+        desc += f"{medal} <@{u['user_id']}> — `{u['boosts']}` boosts (`{u['orders']}` orders)\n"
+
+    embed = discord.Embed(
+        title="🏆 Sōsuke Aizen — Top Customer Leaderboard",
+        description=desc,
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Sōsuke Aizen • Kyōka Suigetsu Shop Engine")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="promos", description="View active promotional discount codes")
+async def slash_promos(interaction: discord.Interaction):
+    discs = list_active_discounts()
+    if not discs:
+        return await interaction.response.send_message("🏷️ There are currently no active public promo codes.", ephemeral=True)
+
+    desc = "*Apply any code below during checkout for instant savings!*\n\n"
+    for code, pct in discs.items():
+        desc += f"• **`{code}`**: `{pct}%` OFF on all boost packages\n"
+
+    embed = discord.Embed(
+        title="🏷️ Active Promotional Discount Codes",
+        description=desc,
+        color=AIZEN_COLOR
+    )
+    embed.set_footer(text="Use in /buy under the discount field")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="setlogchannel", description="Set channel where verified order receipts are auto-logged (Admin only)")
+@app_commands.describe(channel="The channel for order logs")
+async def slash_setlogchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not interaction.user.guild_permissions.administrator and not is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+    await set_setting_db(f"guild_{interaction.guild.id}_order_log_channel", str(channel.id))
+    await set_setting_db("order_log_channel_id", str(channel.id))
+    embed = discord.Embed(
+        title="🛒 Order Log Channel Configured",
+        description=f"✅ Verified order receipts will now automatically be logged to {channel.mention}.",
+        color=AIZEN_ACCENT
+    )
+    await interaction.response.send_message(embed=embed)
+
 
 
 # ==========================================
